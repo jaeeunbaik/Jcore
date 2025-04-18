@@ -1,0 +1,9 @@
+*.scp
+*.txt
+*.model
+*.vocab
+*.pyc
+*.json
+*.log
+models/wandb/
+model_graph
