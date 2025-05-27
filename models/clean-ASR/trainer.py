@@ -5,7 +5,7 @@ import yaml
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer as PLTrainer
-from pytorch_lightning.callbacks import GradientAccumulationScheduler, ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.strategies import DDPStrategy
 
@@ -13,8 +13,6 @@ from modelmodule import ModelModule
 from data.datamodule import ASRDataModule
 from attrdict import AttrDict
 
-import os
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 
 class Trainer:
@@ -31,7 +29,7 @@ class Trainer:
         self.datamodule = ASRDataModule(config)
         
         # Initialize model
-        self.model = ModelModule(self.config.model, self.config.optimizer, config.data.tokenizer)
+        self.model = ModelModule(self.config)
         
         # Setup logging
         logger = WandbLogger(
@@ -52,11 +50,11 @@ class Trainer:
             'log_every_n_steps': config.trainer.log_every_n_steps,
             'val_check_interval': config.trainer.val_check_interval,
             'precision': config.trainer.precision,
+            'accumulate_grad_batches': config.trainer.accumulate_grad_batches,
             'gradient_clip_val': config.trainer.gradient_clip_val,
             'strategy': strategy,
             'reload_dataloaders_every_n_epochs': config.trainer.reload_dataloaders_every_n_epochs
         }
-
 
         self.trainer = PLTrainer(**trainer_kwargs)
 
@@ -64,29 +62,17 @@ class Trainer:
         """Setup training callbacks"""
         callbacks = []
 
-        # Checkpoint saving
-        if hasattr(self.config, 'checkpoint') and self.config.trainer.resume_from_checkpoint:
-            print("Checkpoint saving?")
-            checkpoint_path = os.path.dirname(self.config.checkpoint.model_save_path)
-            callbacks.append(
-                ModelCheckpoint(
-                    dirpath=checkpoint_path,
-                    filename='{epoch}-{val_loss:.3f}',
-                    monitor=self.config.checkpoint.checkpoint_monitor,
-                    save_top_k=self.config.checkpoint.save_top_k,
-                    mode='min',  # Default to min
-                    save_last=True
-                )
-            )
+        checkpoint_path = os.path.dirname(self.config.checkpoint.model_save_path)
         callbacks.append(
-            GradientAccumulationScheduler(scheduling={
-                0: 8,
-                20: 4, 
-                40: 2, 
-                60: 1
-            })
+            ModelCheckpoint(
+                dirpath=checkpoint_path,
+                filename='{epoch:02d}-{val_wer:.4f}',
+                monitor='val_wer',
+                save_top_k=self.config.checkpoint.save_top_k,
+                mode='min',
+                save_last=True
+            )
         )
-        # Learning rate monitoring
         callbacks.append(LearningRateMonitor(logging_interval='step'))
         
         return callbacks
@@ -97,7 +83,7 @@ class Trainer:
         
         # ckpt_path = self.config.trainer.ckpt_path
         if self.config.trainer.resume_from_checkpoint:
-            self.trainer.fit(self.model, self.datamodule, ckpt_path=ckpt_path)
+            self.trainer.fit(self.model, self.datamodule, ckpt_path=self.config.trainer.ckpt_path)
         else:
             self.trainer.fit(self.model, self.datamodule, ckpt_path=None)
         
@@ -111,6 +97,19 @@ class Trainer:
             with open(os.path.join(checkpoint_dir, 'best_model_path.txt'), 'w') as f:
                 f.write(best_model_path)
 
+    def validate(self, ckpt_path=None):    
+        if ckpt_path is None and hasattr(self.trainer, 'checkpoint_callback'):
+            # Use best checkpoint by default
+            ckpt_path = self.trainer.checkpoint_callback.best_model_path
+            if not ckpt_path:
+                print("Warning: No checkpoint found. Using current model state.")
+        
+        if ckpt_path and os.path.exists(ckpt_path):
+            print(f"Loading checkpoint from: {ckpt_path}")
+        
+        self.trainer.validate(self.model, self.datamodule, ckpt_path=ckpt_path)
+    
+    
     def evaluate(self, ckpt_path=None):
         """
         Evaluate the model on test set
@@ -151,8 +150,9 @@ def main():
     """Main function for running the trainer from command line"""
     parser = argparse.ArgumentParser(description="ASR Training Script")
     parser.add_argument('--config', type=str, required=True, help='Path to configuration YAML file')
-    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test', 'train_test'],
+    parser.add_argument('--mode', type=str, default='train', choices=['train', 'validate', 'test', 'train_test'],
                         help='Run mode: train, test, or train then test')
+    parser.add_argument('--ckpt', type=str, help='ckpt path to test')
     args = parser.parse_args()
     
     # Load configuration
@@ -167,6 +167,9 @@ def main():
     
     if args.mode in ['test', 'train_test']:
         trainer.evaluate(args.ckpt)
+        
+    if args.mode == 'validate':
+        trainer.validate(args.ckpt)
 
 
 if __name__ == "__main__":

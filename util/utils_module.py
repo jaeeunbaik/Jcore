@@ -76,11 +76,29 @@ def pad_list(xs, pad_value):
 
     return pad
 
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# Copyright 2020 Johns Hopkins University (Shinji Watanabe)
+#                Northwestern Polytechnical University (Pengcheng Guo)
+#  Apache 2.0  (http://www.apache.org/licenses/LICENSE-2.0)
+
+"""Swish() activation function for Conformer."""
+
+import torch
+
+
+class Swish(torch.nn.Module):
+    """Construct an Swish object."""
+
+    def forward(self, x):
+        """Return Swich activation function."""
+        return x * torch.sigmoid(x)
 
 def get_activation(act):
     """Return activation function."""
     # Lazy load to avoid unused import
-    from models.modules.encoder.swish import Swish
+    # from swish import Swish
 
     activation_funcs = {
         "hardtanh": torch.nn.Hardtanh,
@@ -88,6 +106,7 @@ def get_activation(act):
         "relu": torch.nn.ReLU,
         "selu": torch.nn.SELU,
         "swish": Swish,
+        "glu": torch.nn.GLU,
     }
 
     return activation_funcs[act]()
@@ -185,7 +204,6 @@ def make_pad_mask(lengths, xs=None, length_dim=-1, maxlen=None):
 
     if not isinstance(lengths, list):
         lengths = lengths.long().tolist()
-
     bs = int(len(lengths))
     if maxlen is None:
         if xs is None:

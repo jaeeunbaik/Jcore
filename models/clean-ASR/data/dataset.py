@@ -82,7 +82,7 @@ class Dataset(Dataset):
             self.n_time_masks = self.augmentation.n_time_masks
             self.n_freq_masks = self.augmentation.n_freq_masks
             
-            self.time_masking = TimeMasking(time_mask_param=self.time_mask_param)
+            self.time_masking = TimeMasking(time_mask_param=self.time_mask_param, p=0.05)
             self.freq_masking = FrequencyMasking(freq_mask_param=self.freq_mask_param)
         
         # Speed perturbation

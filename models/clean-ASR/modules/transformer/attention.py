@@ -35,6 +35,7 @@ class MultiHeadedAttention(nn.Module):
         self.linear_out = nn.Linear(n_feat, n_feat)
         self.attn = None
         self.dropout = nn.Dropout(p=dropout_rate)
+        self.layernorm = nn.LayerNorm(n_feat)
 
     def forward_qkv(self, query, key, value):
         """Transform query, key and value.
@@ -74,9 +75,21 @@ class MultiHeadedAttention(nn.Module):
 
         """
         n_batch = value.size(0)
+        if isinstance(mask, tuple):
+            mask = torch.tensor(mask, dtype=torch.bool)
+
         if mask is not None:
             mask = mask.unsqueeze(1).eq(0)  # (batch, 1, *, time2)
+            # mask = mask.unsqueeze(2)
+            # mask = mask.repeat(1, scores.size(1), scores.size(2), 1)
+            # if mask.size(1) == 1:
+            #     mask = mask.unsqueeze(2)
+            #     mask = mask.repeat(1, scores.size(1), scores.size(2), 1)
+            # else:
+            #     mask = mask.unsqueeze(1)
+            #     mask = mask.repeat(1, scores.size(1), 1, 1)
             min_value = torch.finfo(scores.dtype).min
+            # min_value = (-1) * 1e-9
             scores = scores.masked_fill(mask, min_value)
             self.attn = torch.softmax(scores, dim=-1).masked_fill(
                 mask, 0.0
@@ -207,5 +220,6 @@ class RelPositionMultiHeadedAttention(MultiHeadedAttention):
         scores = (matrix_ac + matrix_bd) / math.sqrt(
             self.d_k
         )  # (batch, head, time1, time2)
+        scores = torch.clamp(scores, min=-20.0, max=20.0)
         self.attn = torch.softmax(scores, dim=-1).detach()
         return self.forward_attention(v, scores, mask)

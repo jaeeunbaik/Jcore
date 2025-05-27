@@ -3,8 +3,25 @@ import math
 import logging
 
 from .causal_convs import CausalConv2D
-from .swish import Swish
 
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# Copyright 2020 Johns Hopkins University (Shinji Watanabe)
+#                Northwestern Polytechnical University (Pengcheng Guo)
+#  Apache 2.0  (http://www.apache.org/licenses/LICENSE-2.0)
+
+"""Swish() activation function for Conformer."""
+
+import torch
+
+
+class Swish(torch.nn.Module):
+    """Construct an Swish object."""
+
+    def forward(self, x):
+        """Return Swich activation function."""
+        return x * torch.sigmoid(x)
 
 class Conv2dSubsampling(torch.nn.Module):
     """Convolutional 2D subsampling.
@@ -190,6 +207,7 @@ class Conv2dSubsampling(torch.nn.Module):
         # Transpose to Channel First mode
         else:
             x = x.transpose(1, 2)
+        # print(f'[DEBUG] In Subsampling module, shape={x.shape}, dtype={x.type}, device={x.device}')
         # split inputs if chunking_factor is set
         if self.subsampling_conv_chunking_factor != -1 and self.conv2d_subsampling:
             if self.subsampling_conv_chunking_factor == 1:

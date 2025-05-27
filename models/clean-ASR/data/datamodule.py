@@ -37,7 +37,10 @@ class ASRDataModule(pl.LightningDataModule):
                 self.test_dataset = Dataset(self.data_config, 'testclean')
             else: 
                 self.test_datset = Dataset(self.data_config, 'testother')
-
+        if stage == 'validate':
+            self.val_dataset = Dataset(self.data_config, 'dev')
+        
+        
     def train_dataloader(self):
         """Return training dataloader"""
         return DataLoader(
@@ -102,7 +105,7 @@ class ASRDataModule(pl.LightningDataModule):
         padded_targets = torch.nn.utils.rnn.pad_sequence(
             targets, 
             batch_first=True, 
-            padding_value=-1  # Using -1 as padding to match ignore_id in model
+            padding_value=0  # Using -1 as padding to match ignore_id in model
         )
         
         return padded_features, torch.tensor(feature_lengths), padded_targets

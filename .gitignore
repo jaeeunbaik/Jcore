@@ -5,5 +5,11 @@
 *.pyc
 *.json
 *.log
-models/wandb/
+*.ckpt
+models/clean-ASR/wandb/
+models/clean-ASR-kor
+models/noise-augmented-ASR
+models/self-distill-softL1loss
+wandb/
 model_graph
+config_debug.yaml

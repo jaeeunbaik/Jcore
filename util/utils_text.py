@@ -1,3 +1,4 @@
+import re
 import json
 import logging
 import sys
@@ -21,8 +22,36 @@ class TokenProcessor:
         ids = self.sp.encode(text, out_type=int)
         return torch.tensor(ids, dtype=torch.long)
     
-    def id2text(self, tokens: List[int]) -> str:
-        return self.sp.decode(tokens)
+    def id2text(self, tokens: List[int], filter_blank=False) -> str:
+        """
+        토큰 ID 목록을 텍스트로 변환하는 함수
+        범위를 벗어난 토큰은 자동으로 필터링합니다.
+        """
+        try:
+            # 입력이 텐서인 경우 리스트로 변환
+            if torch.is_tensor(tokens):
+                tokens = tokens.tolist()
+            
+            max_token_id = self.sp.get_piece_size() - 1
+            valid_tokens = []
+            
+            for t in tokens:
+                if filter_blank and t == 0:
+                    continue
+                elif t == -1:
+                    continue
+                elif 0 <= t <= max_token_id:
+                    valid_tokens.append(t)
+                    
+            if not valid_tokens:
+                return ""
+                
+            return self.sp.decode(valid_tokens)
+        
+        except Exception as e:
+            print(f"[ERROR] id2text 함수에서 오류 발생: {str(e)}")
+            print(f"[DEBUG] 원본 토큰: {tokens[:20]}{'...' if len(tokens) > 20 else ''}")
+            return ""
 
 
 
@@ -179,6 +208,14 @@ class ErrorCalculator(object):
             word_ref_lens.append(len(ref_words))
         return float(sum(word_eds)) / sum(word_ref_lens)
 
+def preprocess_text(text):
+    # 모든 문장 부호 제거
+    text = re.sub(r'[,.!?:;\(\)\[\]"\'`]', '', text)
+    # 연속된 공백을 하나로
+    text = re.sub(r'\s+', ' ', text)
+    # 앞뒤 공백 제거
+    text = text.strip().lower()
+    return text
 
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -201,7 +238,7 @@ def add_sos_eos(ys_pad, sos, eos, ignore_id):
     :return: padded tensor (B, Lmax)
     :rtype: torch.Tensor
     """
-    from utils.utils_module import pad_list
+    from util.utils_module import pad_list
 
     _sos = ys_pad.new([sos])
     _eos = ys_pad.new([eos])

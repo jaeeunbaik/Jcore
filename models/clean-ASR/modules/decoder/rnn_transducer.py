@@ -8,6 +8,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from util.utils_module import th_accuracy
+
 
 class RNNTransducer(torch.nn.Module):
     """Decoder module
@@ -32,14 +34,14 @@ class RNNTransducer(torch.nn.Module):
 
     def __init__(
         self,
+        att,
         eprojs,
         odim,
         dtype,
-        dlayers,
-        dunits,
-        sos,
-        eos,
-        att,
+        dlayers=1,
+        dunits=640,
+        sos=2,
+        eos=3,
         verbose=0,
         char_list=None,
         labeldist=None,

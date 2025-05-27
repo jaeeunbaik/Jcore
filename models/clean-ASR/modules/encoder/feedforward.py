@@ -27,7 +27,7 @@ class FeedForward(nn.Module):
         x = self.linear1(x)
         x = self.activation(x)
         x = self.dropout(x)
+        # print(f"[DEBUG] FeedForward inside: shape={x.shape}, dtype={x.type}, device={x.device}")
         x = self.linear2(x)
-        x = self.dropout(x)    
-        
+        x = self.dropout(x)
         return x + res

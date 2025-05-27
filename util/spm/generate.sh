@@ -1,0 +1,1 @@
+python input_txt_generating.py --scp_path /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/kson_aihub비대면/train.scp

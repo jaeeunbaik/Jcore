@@ -3,9 +3,9 @@ from typing import Any, List, Tuple
 
 import torch
 import torch.nn as nn
-from models.modules.transformer.attention import MultiHeadedAttention
-from models.modules.transformer.positionwise_feedforward import PositionwiseFeedForward
-from models.modules.transformer.embedding import PositionalEncoding
+from modules.transformer.attention import MultiHeadedAttention
+from modules.transformer.positionwise_feedforward import PositionwiseFeedForward
+from modules.transformer.embedding import PositionalEncoding
 from util.utils_module import subsequent_mask
 
 class TransformerDecoder(torch.nn.Module):
@@ -73,21 +73,15 @@ class TransformerDecoder(torch.nn.Module):
         
         logging.info("decoder self-attention layer type = self-attention")
         decoder_selfattn_layer = MultiHeadedAttention
-        decoder_selfattn_layer_args = [
-            (
-                attention_heads,
-                attention_dim,
-                self_attention_dropout_rate,
-            )
-        ] * num_blocks
+
         self.decoders = nn.ModuleList([
             DecoderLayer(
                 size=attention_dim,
-                self_attn=decoder_selfattn_layer(*decoder_selfattn_layer_args),
-                feedforward=PositionwiseFeedForward(attention_dim, linear_units, dropout_rate),
-                mhsa=MultiHeadedAttention(
+                self_attn=decoder_selfattn_layer(attention_heads, attention_dim, self_attention_dropout_rate),
+                src_attn=MultiHeadedAttention(
                     attention_heads, attention_dim, src_attention_dropout_rate
                 ),
+                feed_forward=PositionwiseFeedForward(attention_dim, linear_units, dropout_rate),
                 dropout_rate=dropout_rate,
                 normalize_before=normalize_before,
                 concat_after=concat_after,
@@ -98,7 +92,7 @@ class TransformerDecoder(torch.nn.Module):
             self.output_layer = torch.nn.Linear(attention_dim, odim)
         else:
             self.output_layer = None
-        self.layernorm = nn.LayerNorm(odim)
+        self.layernorm = nn.LayerNorm(attention_dim)
         
         
     def forward(self, tgt, tgt_mask, memory, memory_mask):
@@ -118,17 +112,20 @@ class TransformerDecoder(torch.nn.Module):
                 (#batch, maxlen_out, attention_dim).
             torch.Tensor: Score mask before softmax (#batch, maxlen_out).
         """
+        tgt = tgt.to(next(self.embed.parameters()).device)
+        tgt = torch.where(tgt < 0, torch.tensor(0, device=tgt.device), tgt)
         x = self.embed(tgt)
-        x, tgt_mask, memory, memory_mask = self.decoders(
-            x, tgt_mask, memory, memory_mask
-        )
+        for decoder in self.decoders:
+            x, tgt_mask, memory, memory_mask = decoder(
+                x, tgt_mask, memory, memory_mask
+            )
         if self.normalize_before:
             x = self.layernorm(x)
         if self.output_layer is not None:
             x = self.output_layer(x)
         return x, tgt_mask
     
-    def forward_one_step(self, tgt, tgt_mask, memory, cache=None):
+    def forward_one_step(self, tgt, tgt_mask, memory, memory_mask=None, cache=None):
         """Forward one step.
 
         Args:
@@ -148,13 +145,11 @@ class TransformerDecoder(torch.nn.Module):
         new_cache = []
         for c, decoder in zip(cache, self.decoders):
             x, tgt_mask, memory, memory_mask = decoder(
-                x, tgt_mask, memory, memory_mask = decoder(
-                    x, tgt_mask, memory, None, cache=c
-                )
+                x, tgt_mask, memory, memory_mask
             )
             new_cache.append(x)
         if self.normalize_before:
-            y = self.after_norm(x[:, -1])
+            y = self.layernorm(x[:, -1])
         else:
             y = x[:, -1]
             

@@ -35,7 +35,7 @@ class CTC(torch.nn.Module):
         self.ctc_type = self.ctc_type if V(torch.__version__) < V("1.7.0") else "builtin"
         
         if self.ctc_type != self.ctc_type:
-            logging.warning(f"CTC was set to {self.self.ctc_type} due to PyTorch version.")
+            logging.warning(f"CTC was set to {self.ctc_type} due to PyTorch version.")
             
         if self.ctc_type == "builtin":
             reduction_type = "sum" if self.reduce else "none"
@@ -89,18 +89,44 @@ class CTC(torch.nn.Module):
         :return: ctc loss value
         :rtype: torch.Tensor
         """
+        # Check CTC impossibility
+        # print(f"[DEBUG] CTC input - hs_pad: {hs_pad.shape}, hlens: {hlens.shape}, ys_pad: {ys_pad.shape}")
+        ys_lens = torch.tensor([len(y[y != self.ignore_id]) for y in ys_pad], device=hlens.device)
+        invalid_mask = hlens < (2 * ys_lens - 1)
+        # if invalid_mask.any():
+        #     print("❗ CTC 조건을 만족하지 않는 샘플 있음!")
+        #     print("hlens :", hlens[invalid_mask])
+        #     print("ys_lens:", ys_lens[invalid_mask])
+
+        ys = [y[y != self.ignore_id] for y in ys_pad]  # 각 샘플의 유효한 label 길이
+        ys_lens = torch.tensor([len(y) for y in ys], device=hlens.device)
+
+        # ✅ CTC 조건 점검
+        invalid_mask = hlens < (2 * ys_lens - 1)
+        # if invalid_mask.any():
+        #     print("❗ CTC 조건 위반 샘플 있음")
+        #     print("    - hlens:   ", hlens[invalid_mask].tolist())
+        #     print("    - ys_lens:", ys_lens[invalid_mask].tolist())
+
         ys = [y[y != self.ignore_id] for y in ys_pad]
         
         # zero padding for hs
         ys_hat = self.ctc_lo(self.dropout(hs_pad))
         if self.ctc_type != "gtnctc":
             ys_hat = ys_hat.transpose(0, 1)
-            
+        
+        # print(f"[DEBUG] CTC logits shape: {ys_hat.shape}, min={ys_hat.min().item()}, max={ys_hat.max().item()}")
+        
         if self.ctc_type != "builtin":
+            ys_hat = torch.clamp(ys_hat, min=-1e8, max=1e8)
             olens = to_device(ys_hat, torch.LongTensor([len(s) for s in ys]))
             hlens = hlens.long()
             ys_pad = torch.cat(ys)
             self.loss = self.loss_fn(ys_hat, ys_pad, hlens, olens)
+            if torch.isnan(loss).any():
+                print("❌ CTC Loss에서 NaN 발견! 0으로 대체합니다.")
+                loss = torch.zeros_like(loss)
+            self.loss = loss
         else:
             self.loss = None
             hlens = torch.tensor(hlens, dtype=torch.int32, device=hs_pad.device)
