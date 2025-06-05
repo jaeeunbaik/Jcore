@@ -49,7 +49,8 @@ class ASRDataModule(pl.LightningDataModule):
             shuffle=True,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
-            collate_fn=self._collate_fn
+            collate_fn=self._collate_fn,
+            persistent_workers=True
         )
 
     def val_dataloader(self):
@@ -60,7 +61,8 @@ class ASRDataModule(pl.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
-            collate_fn=self._collate_fn
+            collate_fn=self._collate_fn,
+            persistent_workers=True
         )
 
     def test_dataloader(self):
@@ -71,7 +73,8 @@ class ASRDataModule(pl.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
-            collate_fn=self._collate_fn
+            collate_fn=self._collate_fn,
+            persistent_workers=True
         )
     
     def _collate_fn(self, batch):
@@ -95,17 +98,20 @@ class ASRDataModule(pl.LightningDataModule):
         feature_dim = features[0].shape[1]
         
         # Initialize padded tensors
-        padded_features = torch.zeros(batch_size, max_feat_len, feature_dim)
-        
-        # Fill padded tensors
-        for i, (feat, feat_len) in enumerate(zip(features, feature_lengths)):
-            padded_features[i, :feat_len, :] = feat[:feat_len, :]
-        
-        # Pad targets and create target lengths
-        padded_targets = torch.nn.utils.rnn.pad_sequence(
-            targets, 
-            batch_first=True, 
-            padding_value=0  # Using -1 as padding to match ignore_id in model
+        padded_features = torch.nn.utils.rnn.pad_sequence(
+            [f for f, _, _, _ in batch], # features만 추출
+            batch_first=True,
+            padding_value=0.0 # 멜 스펙트로그램의 패딩 값
         )
+        
+        feature_lengths = torch.tensor(feature_lengths) # zip에서 나온 튜플을 텐서로 변환
 
-        return padded_features, torch.tensor(feature_lengths), padded_targets, torch.tensor(target_lengths)
+        # targets 패딩 (기존 코드와 동일)
+        padded_targets = torch.nn.utils.rnn.pad_sequence(
+            targets,
+            batch_first=True,
+            padding_value=0 # 0 또는 모델의 ignore_id에 맞는 값 (토크나이저의 pad_id)
+        )
+        target_lengths = torch.tensor(target_lengths)
+
+        return padded_features, feature_lengths, padded_targets, target_lengths

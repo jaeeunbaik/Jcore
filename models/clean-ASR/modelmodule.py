@@ -50,31 +50,7 @@ class ModelModule(pl.LightningModule):
             report_cer=self.model_config.report_cer,
             report_wer=self.model_config.report_wer
         )
-        
-    
-    def print_model_structure(self):
-        """모델 구조 및 파라미터 출력"""
-        print("\n===== 모델 구조 =====")
-        total_params = 0
-        for name, module in self.model.named_modules():
-            if len(list(module.children())) == 0:  # 말단 모듈만 출력
-                params = sum(p.numel() for p in module.parameters())
-                total_params += params
-                print(f"{name}: {module.__class__.__name__}, 파라미터 수: {params:,}")
-        
-        print(f"총 파라미터 수: {total_params:,}")
-        
-        # encoder와 ctc 모듈 확인
-        print("\n===== 주요 모듈 확인 =====")
-        if hasattr(self.model, 'encoder'):
-            print(f"Encoder type: {type(self.model.encoder)}")
-        else:
-            print("Encoder not found!")
-            
-        if hasattr(self.model, 'ctc'):
-            print(f"CTC type: {type(self.model.ctc)}")
-        else:
-            print("CTC module not found!")    
+      
 
     
     def training_step(self, batch, batch_idx):
@@ -100,7 +76,12 @@ class ModelModule(pl.LightningModule):
             
             return loss.get("loss")
 
-
+    def on_train_epoch_end(self):
+        # GPU 캐시 메모리 정리
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print(f"Epoch {self.current_epoch}: Cleared CUDA cache.")
+    
     def validation_step(self, batch, batch_idx):
         x, x_len, y, y_len = batch
         
@@ -319,82 +300,6 @@ class ModelModule(pl.LightningModule):
             }
         }
             
-            
-    # def check_unused_parameters(self, x, x_len, y):
-    #     """
-    #     모델의 사용 및 미사용 파라미터를 확인하는 함수
-    #     """
-    #     # 그래디언트 초기화
-    #     self.model.train()
-    #     self.model.zero_grad()
-        
-    #     # 파라미터 이름과 requires_grad 상태 저장
-    #     param_status_before = {}
-    #     for name, param in self.model.named_parameters():
-    #         param_status_before[name] = {
-    #             'requires_grad': param.requires_grad,
-    #             'grad': param.grad,
-    #         }
-        
-    #     # 포워드 및 백워드 패스 수행
-    #     loss = self.model(x, x_len, y)
-    #     if isinstance(loss, dict):
-    #         loss_value = loss.get('loss')
-    #         if loss_value is not None:
-    #             loss_value.backward()
-    #     else:
-    #         loss.backward()
-        
-    #     # 사용/미사용 파라미터 확인
-    #     used_params = []
-    #     unused_params = []
-        
-    #     for name, param in self.model.named_parameters():
-    #         if param.requires_grad:
-    #             if param.grad is None:
-    #                 unused_params.append(name)
-    #             else:
-    #                 # 그래디언트가 0이 아닌 요소가 있는지 확인
-    #                 if param.grad.abs().sum().item() > 0:
-    #                     used_params.append(name)
-    #                 else:
-    #                     unused_params.append(name)
-        
-    #     print(f"\n===== 총 파라미터 수: {len(param_status_before)} =====")
-    #     print(f"사용된 파라미터 수: {len(used_params)} ({len(used_params)/len(param_status_before):.2%})")
-    #     print(f"미사용 파라미터 수: {len(unused_params)} ({len(unused_params)/len(param_status_before):.2%})")
-        
-    #     # 미사용 파라미터 출력 (선택적으로 사용)
-    #     if unused_params:
-    #         print("\n미사용 파라미터 목록:")
-    #         for name in unused_params:
-    #             print(f"- {name}")
-        
-    #     # 모델 구조별 사용/미사용 파라미터 비율 분석
-    #     module_stats = {}
-    #     for name in param_status_before.keys():
-    #         # 모듈 이름 추출 (첫 번째 dot까지)
-    #         module_name = name.split('.')[0] if '.' in name else 'base'
-            
-    #         if module_name not in module_stats:
-    #             module_stats[module_name] = {'used': 0, 'unused': 0, 'total': 0}
-            
-    #         module_stats[module_name]['total'] += 1
-    #         if name in used_params:
-    #             module_stats[module_name]['used'] += 1
-    #         else:
-    #             module_stats[module_name]['unused'] += 1
-        
-    #     print("\n모듈별 파라미터 사용 현황:")
-    #     for module_name, stats in module_stats.items():
-    #         used_percent = stats['used'] / stats['total'] * 100 if stats['total'] > 0 else 0
-    #         print(f"{module_name}: {stats['used']}/{stats['total']} 사용 ({used_percent:.1f}%)")
-        
-    #     # 그래디언트 초기화
-    #     self.model.zero_grad()
-        
-    #     return used_params, unused_params
-    
     
     def log_text(self, key: str, value: str, step: int):
         """

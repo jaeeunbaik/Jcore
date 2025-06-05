@@ -40,7 +40,7 @@ class Trainer:
         
         # Setup callbacks
         callbacks = self._setup_callbacks()
-        strategy = DDPStrategy(find_unused_parameters=True)
+        strategy = DDPStrategy(find_unused_parameters=False)
         # Initialize PyTorch Lightning trainer
         trainer_kwargs = {
             'max_epochs': config.trainer.num_epochs,

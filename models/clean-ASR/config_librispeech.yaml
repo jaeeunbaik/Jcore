@@ -98,12 +98,12 @@ trainer:
   accumulate_grad_batches: 4
   gpus: 5
   gradient_clip_val: 10.0
-  resume_from_checkpoint: false
+  resume_from_checkpoint: true
   log_every_n_steps: 100
   val_check_interval: 1.0
   strategy: "ddp"  # ddp, ddp_spawn, deepspeed
   reload_dataloaders_every_n_epochs: 4
-  ckpt_path: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/models/clean-ASR/models/epoch=11-val_wer=11.5736.ckpt
+  ckpt_path: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/models/clean-ASR/models/epoch=12-val_wer=3.5461.ckpt
 checkpoint:
   checkpoint_monitor: "val_loss"
   save_top_k: -1  # all models are saved
