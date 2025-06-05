@@ -1,6 +1,6 @@
 dataloader:
-  batch_size: 10
-  num_workers: 4
+  batch_size: 2
+  num_workers: 0
   pin_memory: False
 data:
   scp_dir: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/librispeech/
@@ -30,32 +30,32 @@ data:
     speed_perturb: false
     speed_factors: [0.9, 1.0, 1.1]  # 0.9가 33%로 적용, 1.0이 33%로 적용, 1.1이 33%로 적용
     speed_prob: 0.5
-  tokenizer: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/util/spm/unigram/unigram2000.model
+  tokenizer: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/util/spm/unigram/unigram5000.model
 model:
   asr:
     encoder:
       type: "Conformer"
-      input_dim: 80
-      input_dropout_p: 0.1
+      sampling_in: 80
+      subsampling: "conv"  # dwconv, conv
+      subsampling_factor: 4  # subsampling to 1/(subsampling_factor) length.
+      subsampling_channels: 128
       num_blocks: 16
-      encoder_dim: 256
+      input_size: 128
+      output_size: 256
       pos_embed_type: "relpos"  # relpos, abspos
-      dropout_rate: 0.1
+      dropout_rate: 0.01
       ff_expansion_factor: 4
       ff_activation_type: "swish"
-      ff_dropout_p: 0.1
       attention_heads: 4
-      att_dropout_p: 0.1
-      linear_units: 1024
+      linear_units: 2048
       cnn_module_kernel: 31
-      conv_expansion_factor: 2
       conv_batchnorm: True  # True: Batch normalization in ConvModule, else LayerNorm
-      conv_dropout_p: 0.1
-      half_step_residual: True
+      return_intermediates: False
+      normalize_before: False
     decoder:
       decoding_method: "beamsearch"  # greedy, beamsearch
       lm_fld: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/lm/librispeech/librispeech-4-gram
-      beam_size: 5  # if ctc only, decoding method is greedy search (= no beam search)
+      beam_size: 10  # if ctc only, decoding method is greedy search (= no beam search)
       penalty: 0.3  # < 0: 너무 짧은 출력 억제, 0.0 ~ 0.2 : 일반적인 ASR, 0.3 이상: 너무 긴 출력 억제
       minlenratio: 0.1
       maxlenratio: 1.0 # 디코딩 출력의 최대 길이, len(encoder) * maxlenratio
@@ -66,7 +66,7 @@ model:
       ctc_type: "builtin"  # builtin, cudnnctc, gtnctc
       ctc_weight: 0.0
       eprojs: 256      
-      odim: 2000
+      odim: 5000
       # rnnt
       dtype: lstm  # lstm, gru
       dlayers: 1
@@ -75,7 +75,6 @@ model:
       dropout_rate: 0.0
       loss_function: "CE"  # KL_Div, CE
       lsm_weight: 0.1
-    char_list:
     sym_space: " "
     sym_blank: "<blank>"
     report_cer: False
@@ -88,29 +87,29 @@ model:
     target: "encoder"  # encoder, ctc
 
 trainer:
-  proj: "Clean-ASR"
+  proj: "Debugging"
   exp_name: "rnnt decoder"
   log_dir: "logs"
-  num_epochs: 80
+  num_epochs: 50
   weight_decay: 1e-6
   warmup_epochs: 10
   precision: 32
   accumulate_grad_batches: 4
-  gpus: 5
-  gradient_clip_val: 10.0
+  gpus: 1
+  gradient_clip_val: 1.0
   resume_from_checkpoint: false
   log_every_n_steps: 100
   val_check_interval: 1.0
   strategy: "ddp"  # ddp, ddp_spawn, deepspeed
   reload_dataloaders_every_n_epochs: 4
-  ckpt_path: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/models/clean-ASR/models/epoch=11-val_wer=11.5736.ckpt
+  ckpt_path: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/models/clean-ASR/models/epoch=00-val_wer=2.7563.ckpt
 checkpoint:
   checkpoint_monitor: "val_loss"
   save_top_k: -1  # all models are saved
   model_save_path: "models/clean_ASR.pth"
 optimizer:
   type: "AdamW"
-  op_lr: 5e-5
+  op_lr: 1e-4
   max_epochs: 100
   warmup_steps: 10000
   scheduling_type: "lambda"  # cosine-annealing, warmup, lambda

@@ -14,6 +14,7 @@ from data.datamodule import ASRDataModule
 from attrdict import AttrDict
 
 
+torch.backends.cudnn.benchmark = True
 
 class Trainer:
     def __init__(self, config):

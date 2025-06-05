@@ -84,8 +84,8 @@ class ASRDataModule(pl.LightningDataModule):
         # Sort batch by feature length (descending)
         batch.sort(key=lambda x: x[1], reverse=True)
         
-        # Separate features, lengths, targets, target_lengths
-        features, feature_lengths, targets, target_lengths = zip(*batch)
+        # Separate features, lengths, and targets
+        features, feature_lengths, targets = zip(*batch)
         
         # Get max lengths
         max_feat_len = max(feature_lengths)
@@ -107,5 +107,5 @@ class ASRDataModule(pl.LightningDataModule):
             batch_first=True, 
             padding_value=0  # Using -1 as padding to match ignore_id in model
         )
-
-        return padded_features, torch.tensor(feature_lengths), padded_targets, torch.tensor(target_lengths)
+        
+        return padded_features, torch.tensor(feature_lengths), padded_targets

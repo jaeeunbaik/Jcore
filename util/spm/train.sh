@@ -1,11 +1,11 @@
 #!/bin/bash
 # filepath: /home/hdd2/jenny/Self-Distillation-ASR/util/spm/train.sh
 
-nbpe=5000
-bpemode=word
+nbpe=2000
+bpemode=char
 mkdir -p ${bpemode}
-dict=${bpemode}/${bpemode}${nbpe}_units.txt
-bpemodel=${bpemode}/${bpemode}${nbpe}
+dict=${bpemode}/kor_${bpemode}${nbpe}_units.txt
+bpemodel=${bpemode}/kor_${bpemode}${nbpe}
 
 # 1단계: SentencePiece 모델 학습
 python spm_train.py \

@@ -3,17 +3,20 @@
 """
 import re
 import random 
-
+import logging
 import jiwer
 import torch
+import wandb
 import numpy as np
 import pytorch_lightning as pl
+from typing import List
 
-from util.utils_text import TokenProcessor, preprocess_text
-from modules.loss.kd_loss import KDLoss
-from modules.kd_wrapper import KDWrapper
+import sentencepiece as spm
+
+from util.utils_text import TokenProcessor, ErrorCalculator, preprocess_text
 from modules.e2e_asr_model import e2eASR
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 class ModelModule(pl.LightningModule):
@@ -29,30 +32,25 @@ class ModelModule(pl.LightningModule):
             
         #     self.model = KDWrapper(self.teacher_model, self.student_model, self.kd_loss, model_config.distillation.target)
         # else:
-        self.model = e2eASR(self.model_config)
         self.optim_config = config.optimizer
         self.lr = np.float64(self.optim_config.op_lr)
         self.tokenizer_path = config.data.tokenizer
+        self.token_processor = TokenProcessor(config.data.tokenizer)
         self.trainer_config = config.trainer
+        self.model = e2eASR(self.model_config, self.tokenizer_path)
         
-    def log_gradient_norms(self):
-        total_norm = 0.0
-        module_norms = {}
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and param.grad is not None:
-                module = name.split('.')[0]
-                norm = param.grad.norm().item()
-                if module not in module_norms:
-                    module_norms[module] = []
-                module_norms[module].append(norm)
-                total_norm += norm ** 2
-        total_norm = total_norm ** 0.5
+        self.sp_processor = spm.SentencePieceProcessor()
+        self.sp_processor.load(self.tokenizer_path)
         
-        # 로그 기록
-        self.log("grad/total_norm", total_norm, prog_bar=False)
-        for module, norms in module_norms.items():
-            avg_norm = sum(norms) / len(norms)
-            self.log(f"grad/{module}_norm", avg_norm, prog_bar=False)
+        self.char_list = [self.sp_processor.id_to_piece(i) for i in range(self.model_config.decoder.odim)]
+        self.error_calculator = ErrorCalculator(
+            char_list=self.char_list,
+            sym_space=self.model_config.sym_space,
+            sym_blank=self.model_config.sym_blank,
+            report_cer=self.model_config.report_cer,
+            report_wer=self.model_config.report_wer
+        )
+        
     
     def print_model_structure(self):
         """모델 구조 및 파라미터 출력"""
@@ -78,56 +76,19 @@ class ModelModule(pl.LightningModule):
         else:
             print("CTC module not found!")    
 
-    # 모델 구조랑 파라미터랑 파라미터수 출력할려면
-    def on_train_start(self):
-        """훈련 시작 시 호출되는 메서드"""
-        super().on_train_start()
-        self.print_model_structure()
-        # 첫 번째 배치에 대해 미사용 파라미터 확인
-        # print("\n==== 미사용 파라미터 확인 시작 ====")
-    #     self._parameter_debugging_done = False
-
-    def on_train_batch_end(self, batch_output, batch, batch_idx):
-        """각 배치 시작 시 호출되는 메서드"""
-        # 첫 배치에서만 디버깅 실행
-        if batch_idx == 0 and not getattr(self, '_parameter_debugging_done', False):
-            x, x_len, y = batch
-            # 배치 크기가 너무 크면 첫 번째 샘플만 사용
-            if x.size(0) > 1:
-                x = x[:1]
-                x_len = x_len[:1]
-                if y is not None and not isinstance(y, dict):
-                    y = y[:1] if len(y.shape) > 0 else y
-            
-            # print("\n디버깅 샘플 형태:")
-            # print(f"x: {x.shape}, x_len: {x_len.shape}")
-            if y is not None:
-                if isinstance(y, dict):
-                    y_shape = {k: v.shape for k, v in y.items()}
-                else:
-                    y_shape = y.shape
-                # print(f"y: {y_shape}")
-            
-            # 파라미터 사용 상태 확인
-            # _, _ = self.check_unused_parameters(x, x_len, y)
-            # self._parameter_debugging_done = True
-            
-            # print("\n==== 미사용 파라미터 확인 완료 ====\n")
     
     def training_step(self, batch, batch_idx):
-        x, x_len, y = batch
-        
+        x, x_len, y, y_len = batch
         if self.use_kd:
-            loss_dict = self.model(x, x_len, y)
+            loss_dict = self.model(x, x_len, y, y_len)
             self.log("train/total_loss", loss_dict["total_loss"])
             self.log("train/kd_loss", loss_dict["kd_loss"])
             self.log("train/asr_loss", loss_dict["student_loss"])
             return loss_dict["total_loss"]
         else:
-            loss = self.model(x, x_len, y)
+            loss = self.model(x, x_len, y, y_len)
             log_items = {
                 "train/total_loss": loss.get("loss"),
-                "train/ctc_loss": loss.get("loss_ctc"),
                 "train/cer": loss.get("cer"),
                 "train/wer": loss.get("wer"),
             }
@@ -136,109 +97,111 @@ class ModelModule(pl.LightningModule):
             for key, value in log_items.items():
                 if value is not None:
                     self.log(key, value, prog_bar=True, sync_dist=True)
-            ctc_probs = self.model.calculate_all_ctc_probs(x, x_len, y)
-            if ctc_probs is not None:
-                confidence = torch.tensor(ctc_probs).max(-1)[0].mean().item()
-                self.log("train/ctc_confidence", confidence, prog_bar=True)
-
-            # --- Attention visualization ---
-            attn_weights = self.model.calculate_all_attentions(x, x_len, y)
-            if "decoder.0.self_attn" in attn_weights:
-                attn_matrix = attn_weights["decoder.0.self_attn"][0]
-                self.logger.experiment.add_image(
-                    "train/attention", torch.tensor(attn_matrix).mean(0, keepdim=True), self.global_step
-                )
-
-                self.log_gradient_norms()
+            
             return loss.get("loss")
 
 
     def validation_step(self, batch, batch_idx):
-        x, x_len, y = batch
+        x, x_len, y, y_len = batch
+        
+        self.model.eval()
 
         if self.use_kd:
-            loss_dict = self.model(x, x_len, y)
+            loss_dict = self.model(x, x_len, y, y_len)
             self.log("val/loss", loss_dict["total_loss"])
             self.log("val/kd_loss", loss_dict["kd_loss"])
             self.log("val/asr_loss", loss_dict["student_loss"])
         else:
-            loss = self.model(x, x_len, y)
+            loss_output = self.model(x, x_len, y, y_len) 
             log_items = {
-                "val/loss": loss.get("loss"),
-                "val/ctc_loss": loss.get("loss_ctc"),
-                "val/att_loss": loss.get("loss_att"),
-                "val/wer": loss.get("wer"),
-                "val/cer": loss.get("cer"),
+                "val/loss": loss_output.get("loss"),
+                "val/ctc_loss": loss_output.get("loss_ctc"),
+                "val/att_loss": loss_output.get("loss_att"),
             }
 
-            # None이 아닌 값만 log로 넘김
             for key, value in log_items.items():
                 if value is not None:
                     self.log(key, value, prog_bar=True, sync_dist=True)
-            ctc_probs = self.model.calculate_all_ctc_probs(x, x_len, y)
-            if ctc_probs is not None:
-                confidence = torch.tensor(ctc_probs).max(-1)[0].mean().item()
-                self.log("val/ctc_confidence", confidence, prog_bar=True)
-
-            # --- Attention visualization ---
-            attn_weights = self.model.calculate_all_attentions(x, x_len, y)
-            if "decoder.0.self_attn" in attn_weights:
-                attn_matrix = attn_weights["decoder.0.self_attn"][0]
-                self.logger.experiment.add_image(
-                    "val/attention", torch.tensor(attn_matrix).mean(0, keepdim=True), self.global_step
-                )
-
-            # --- Prediction output logging ---
-            self.token_processor = TokenProcessor(self.tokenizer_path)
-
-
-            # 모델 디코딩
+            
             with torch.no_grad():
-                decoded = self.model.recognize(x, x_len, y, recog_args=self.model_config.decoder)
+                recog_args = self.model_config.decoder 
+                decoded_raw_output = self.model.recognize(x, x_len, y, y_len, recog_args=recog_args)
+            
+            predicted_transcriptions: List[str] = []
+
+            if isinstance(decoded_raw_output, list):
+                if all(isinstance(d, str) for d in decoded_raw_output):
+                    predicted_transcriptions = decoded_raw_output
+                else:
+                    logging.warning(f"Decoded output is a list but not List[str]. Type: {type(decoded_raw_output[0]) if decoded_raw_output else 'empty'}")
+                    predicted_transcriptions = [""] * len(x)
+
+            elif isinstance(decoded_raw_output, dict):
+                if decoded_raw_output:
+                    # 딕셔너리 값은 List[List[str]] 형태입니다.
+                    first_key_value = next(iter(decoded_raw_output.values())) 
+                    
+                    if isinstance(first_key_value, list) and all(isinstance(s, list) and all(isinstance(w, str) for w in s) for s in first_key_value):
+                        # 각 내부 리스트(단어 리스트)를 공백으로 조인하여 하나의 문자열로 만듭니다.
+                        predicted_transcriptions = [" ".join(word_list) for word_list in first_key_value]
+                    elif isinstance(first_key_value, list) and all(isinstance(s, str) for s in first_key_value):
+                        # 이미 List[str] 형태인 경우 (이 경우는 발생하지 않을 가능성이 높음)
+                        predicted_transcriptions = first_key_value
+                    else:
+                        logging.warning(f"Decoded output dict value is not List[List[str]] or List[str]. Actual type: {type(first_key_value)}")
+                        predicted_transcriptions = [""] * len(x)
+                else:
+                    logging.warning("Decoded output is an empty dictionary.")
+                    predicted_transcriptions = [""] * len(x)
+            else:
+                logging.warning(f"Unsupported decoded output type: {type(decoded_raw_output)}")
+                predicted_transcriptions = [""] * len(x) 
+
+            # Ground Truth 텍스트 변환
+            reference_transcriptions: List[str] = []
+            for i in range(len(y)):
+                gt_tokens = y[i].tolist()
+                gt_text = self.token_processor.id2text(gt_tokens, filter_blank=True)
+                reference_transcriptions.append(gt_text)
+            
+            # 텍스트 전처리 (WER 계산을 위해 공통적으로 수행)
+            try:
+                processed_predicted_transcriptions = [preprocess_text(text) for text in predicted_transcriptions]
+                processed_reference_transcriptions = [preprocess_text(text) for text in reference_transcriptions]
+            except NameError:
+                logging.warning("preprocess_text function not found. Using raw transcriptions for WER.")
+                processed_predicted_transcriptions = predicted_transcriptions
+                processed_reference_transcriptions = reference_transcriptions
 
             batch_wers = []
-            self.token_processor = TokenProcessor(self.tokenizer_path)
+            try:
+                import jiwer # jiwer 임포트 확인
+                for gt, pred in zip(processed_reference_transcriptions, processed_predicted_transcriptions):
+                    if gt or pred: 
+                        wer = jiwer.wer(gt, pred)
+                        batch_wers.append(wer)
+                    else:
+                        logging.debug(f"Skipping WER for empty GT/PR. GT='{gt}', PR='{pred}'")
+            except ImportError:
+                logging.error("jiwer library not installed. Cannot calculate WER. Please install it with 'pip install jiwer'.")
+                batch_wers = []
 
-            if decoded:  # decoded = [{'score': score, 'yseq': [2, token1, ...]}, ... ]
-                for i in range(len(decoded)):  # 배치 크기만큼 반복
-                    # print(f"[DEBUG] decoded 정보 len(decoded[0]['yseq']) : {len(decoded[0]['yseq'])}")
-                    # print(f"[DEBUG] decoded 정보 len(decoded[0]['yseq'][1:]) : {len(decoded[0]['yseq'][1:])}")
-                    # print(f"[DEBUG] decoded 정보 decoded[0]['yseq'][1:][i] : {decoded[0]['yseq'][1:][i]}")
-                    if 'yseq' in decoded[i]:
-                        yseq = decoded[i]['yseq'][1:]  # SOS 토큰 제외
-                        pred_text = self.token_processor.id2text(yseq, filter_blank=True) if yseq else ""
+            if batch_wers:
+                avg_wer = sum(batch_wers) / len(batch_wers)
+                self.log("val_wer", avg_wer, prog_bar=True, sync_dist=True)
+            else:
+                self.log("val_wer", 1.0, prog_bar=True, sync_dist=True) 
 
-                        # Ground Truth 텍스트 변환
-                        gt_tokens = y[i].tolist() if i < len(y) else []
-                        gt_text = self.token_processor.id2text(gt_tokens, filter_blank=True)
-
-                        # 텍스트 전처리
-                        pred_text = preprocess_text(pred_text)
-                        gt_text = preprocess_text(gt_text)
-
-                        # WER 계산
-                        if gt_text and pred_text:
-                            wer = jiwer.wer(gt_text, pred_text)
-                            batch_wers.append(wer)
-
-                            # 각 배치의 첫 번째 샘플에 대해 예측 및 실제 텍스트 출력
-                            if i == 0:  # 첫 번째 샘플
-                                print(f"\n===== 배치 {batch_idx}, 샘플 {i} =====")
-                                print(f"GT: '{gt_text}'")
-                                print(f"PR: '{pred_text}'")
-                                print(f"WER: {wer:.4f} ({wer * 100:.2f}%)")
-                        else:
-                            if i == 0:  # 첫 번째 샘플
-                                print(f"\n===== 배치 {batch_idx}, 샘플 {i} =====")
-                                print("빈 텍스트가 있어 WER를 계산할 수 없습니다.")
-
-                # 평균 WER 계산 및 로깅
+            if batch_idx == 0 and len(processed_reference_transcriptions) > 0:
+                logging.info(f"\n===== Batch {batch_idx}, Sample 0 (Decoder Type: {self.model.decoder_type}) =====")
+                logging.info(f"GT: '{processed_reference_transcriptions[0]}'")
+                logging.info(f"PR: '{processed_predicted_transcriptions[0]}'")
                 if batch_wers:
-                    avg_wer = sum(batch_wers) / len(batch_wers)
-                    self.log("val_wer", avg_wer, prog_bar=True)
+                    logging.info(f"WER: {batch_wers[0]:.4f} ({batch_wers[0] * 100:.2f}%)")
                 else:
-                    self.log("val_wer", 0, prog_bar=True)
-                                
+                    logging.info("WER calculation skipped (no valid texts or jiwer not installed).")
+
+                    
                 
                 
     def on_validation_epoch_start(self):
@@ -269,134 +232,41 @@ class ModelModule(pl.LightningModule):
                 
                 
     def test_step(self, batch, batch_idx):
-        x, x_len, y = batch
-
+        x, x_len, y, y_len = batch
         if self.use_kd:
             logits = self.student_model.encode(x, x_len)
-            decoded = self.student_model.recognize(logits)
+            decoded_trans = self.student_model.recognize(logits)
         else:
-            decoded = self.model.recognize(x, x_len, y, self.model_config.decoder)
+            decoded_trans = self.model.recognize(x, x_len, y, self.model_config.decoder)
 
-        # 텍스트로 변환
-        self.token_processor = TokenProcessor(self.tokenizer_path)
-        id2text = self.token_processor.id2text
+        ref_trans: List[str] = []
+        for single_y_tokens in y:
+            # ignore_id (padding)를 제외하고 실제 토큰만 사용
+            # self.model.sos, self.model.eos 도 고려하여 제거해야 할 수 있습니다.
+            # 이 부분은 토크나이저 및 데이터셋 구성에 따라 달라질 수 있습니다.
+            filtered_tokens = [
+                token.item() for token in single_y_tokens 
+                if token.item() != self.model.ignore_id and 
+                   token.item() != self.model.sos and 
+                   token.item() != self.model.eos
+            ]
+            ref_trans.append(self.token_processor.id2text(filtered_tokens))
         
-        # 결과 확인
-        if decoded and len(decoded) > 0:
-            yseq = decoded[0]['yseq']
-            
-            # 텍스트 변환 (SOS 토큰 제외)
-            if len(yseq) > 1:
-                pred_tokens = yseq[1:]
-                
-                # 각 토큰을 개별적으로 디코딩하여 리스트 생성
-                token_texts = []
-                for token in pred_tokens:
-                    if torch.is_tensor(token):
-                        token_id = token.item() if token.numel() == 1 else token.tolist()
-                    else:
-                        token_id = token
-                        
-                    # 각 토큰을 텍스트로 변환
-                    token_text = id2text([token_id] if isinstance(token_id, int) else token_id)
-                    token_texts.append(token_text)
-                
-                # 토큰을 공백으로 연결하고 후처리
-                raw_text = " ".join(token_texts)
-                
-                # 후처리: 불필요한 공백 정리
-                cleaned_text = re.sub(r'\s+', ' ', raw_text)                  # 연속된 공백을 하나로
-                cleaned_text = re.sub(r'\s([,.!?:;])', r'\1', cleaned_text)   # 문장 부호 앞 공백 제거
-                cleaned_text = cleaned_text.strip()                           # 앞뒤 공백 제거
-                
-                # SentencePiece에서 자주 발생하는 특수 처리
-                cleaned_text = re.sub(r'\s+▁', ' ', cleaned_text)  # SentencePiece 토큰 특수 처리
-                cleaned_text = cleaned_text.replace('▁', ' ')      # SentencePiece 마커를 공백으로 변환
-                cleaned_text = re.sub(r'\s+', ' ', cleaned_text)   # 다시 연속된 공백 제거
-                
-                # GT 토큰 필터링 및 텍스트 변환
-                try:
-                    # Ground Truth 텍스트 처리
-                    gt_tokens_raw = y[0].tolist() if y.dim() > 1 else y.tolist()
-                    
-                    # -1 및 특수 토큰 필터링 (0: padding, 1: sos, 2: eos, -1: ignore_id)
-                    valid_tokens = []
-                    for t in gt_tokens_raw:
-                        # 유효한 토큰 범위 확인 (토크나이저 사전 크기에 따라 조정 필요)
-                        max_token_id = self.token_processor.sp.get_piece_size() - 1
-                        
-                        # 유효한 범위의 토큰만 포함
-                        if 0 <= t <= max_token_id:
-                            valid_tokens.append(t)
-                        elif t == -1:
-                            # -1 토큰(ignore_id)은 출력하지 않음
-                            continue
-                        else:
-                            # 예상치 못한 토큰 ID 디버깅
-                            self.print(f"[WARNING] 범위를 벗어난 토큰 ID: {t}")
-                    
-                    # 필터링된 토큰으로 텍스트 변환
-                    if valid_tokens:
-                        gt_text = id2text(valid_tokens)
-                    else:
-                        gt_text = "[토큰 없음]"
-                    
-                except Exception as e:
-                    self.print(f"[ERROR] GT 텍스트 변환 중 오류 발생: {e}")
-                    gt_text = "[처리 오류]"
-                
-                # 예시 출력
-                self.print(f"\n--- 테스트 샘플 {batch_idx} ---")
-                self.print(f"GT: {gt_text}")
-                self.print(f"PR: {cleaned_text}")
-                
-                # WER 계산 (jiwer 라이브러리 사용)
-                try:
-                    import jiwer
-                    
-                    # 텍스트 전처리
-                    gt_processed = preprocess_text(gt_text)
-                    pr_processed = preprocess_text(cleaned_text)
-                    
-                    # 전처리된 텍스트가 빈 문자열이면 계산 생략
-                    if len(gt_processed.strip()) > 0 and len(pr_processed.strip()) > 0:
-                        # WER 계산
-                        sample_wer = jiwer.wer(gt_processed, pr_processed)
-                        
-                        # WER을 로그로 저장
-                        self.log(f"test_sample_wer", sample_wer, on_step=True)
-                        
-                        # 통계를 추적하기 위한 전역 변수 업데이트
-                        if not hasattr(self, 'wer_sum'):
-                            self.wer_sum = 0.0
-                            self.wer_count = 0
-                        
-                        self.wer_sum += sample_wer
-                        self.wer_count += 1
-                        
-                        # 현재 평균 WER 계산 및 로깅
-                        current_avg_wer = self.wer_sum / self.wer_count
-                        self.log("test_avg_wer", current_avg_wer, on_step=True)
-                        
-                        # WER 출력
-                        self.print(f"WER: {sample_wer:.4f} ({sample_wer*100:.2f}%)")
-                        self.print(f"현재까지 평균 WER: {current_avg_wer:.4f} ({current_avg_wer*100:.2f}%)")
-                        self.print(f"처리된 샘플 수: {self.wer_count}")
-                    else:
-                        self.print("텍스트가 비어 있어 WER 계산을 건너뜁니다.")
-                    
-                except ImportError:
-                    self.print("jiwer 라이브러리가 없어 WER 계산을 건너뜁니다. 'pip install jiwer'로 설치하세요.")
-                except Exception as e:
-                    self.print(f"WER 계산 중 오류: {str(e)}")
-                
-                return {"text": cleaned_text, "wer": current_avg_wer}
+        cer_batch = self.error_calculator.calculate_cer(decoded_trans, ref_trans)
+        wer_batch = self.error_calculator.calculate_wer(decoded_trans, ref_trans)
         
-        # 디코딩 결과가 없거나 오류가 발생한 경우
-        self.print(f"\n--- 테스트 샘플 {batch_idx} ---")
-        self.print("디코딩 실패")
-        return {"text": "디코딩 실패"}
+        # 평균 CER/WER 로깅 (배치 단위)
+        self.log("test_cer", cer_batch, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log("test_wer", wer_batch, on_step=True, on_epoch=True, prog_bar=True, logger=True)
 
+        # 필요하다면 추가적인 로깅 또는 결과 반환
+        return {
+            "decoded_transcriptions": decoded_trans,
+            "reference_transcriptions": ref_trans,
+            "cer_batch": cer_batch,
+            "wer_batch": wer_batch
+        }
+        
             
     def configure_optimizers(self):
         # optimizer
@@ -422,7 +292,7 @@ class ModelModule(pl.LightningModule):
                 step = 1  # 0으로 나누는 것을 방지
             scale = d_model ** -0.5
             return scale * min(step ** -0.5, step * (warmup_steps ** -1.5))
-        d_model = self.model_config.encoder.output_size
+        d_model = self.model_config.encoder.encoder_dim
         warmup_steps = self.optim_config.warmup_steps
         def lr_lambda(step):
             return transformer_lr_schedule(step, d_model, warmup_steps)
@@ -450,78 +320,91 @@ class ModelModule(pl.LightningModule):
         }
             
             
-    def check_unused_parameters(self, x, x_len, y):
-        """
-        모델의 사용 및 미사용 파라미터를 확인하는 함수
-        """
-        # 그래디언트 초기화
-        self.model.train()
-        self.model.zero_grad()
+    # def check_unused_parameters(self, x, x_len, y):
+    #     """
+    #     모델의 사용 및 미사용 파라미터를 확인하는 함수
+    #     """
+    #     # 그래디언트 초기화
+    #     self.model.train()
+    #     self.model.zero_grad()
         
-        # 파라미터 이름과 requires_grad 상태 저장
-        param_status_before = {}
-        for name, param in self.model.named_parameters():
-            param_status_before[name] = {
-                'requires_grad': param.requires_grad,
-                'grad': param.grad,
-            }
+    #     # 파라미터 이름과 requires_grad 상태 저장
+    #     param_status_before = {}
+    #     for name, param in self.model.named_parameters():
+    #         param_status_before[name] = {
+    #             'requires_grad': param.requires_grad,
+    #             'grad': param.grad,
+    #         }
         
-        # 포워드 및 백워드 패스 수행
-        loss = self.model(x, x_len, y)
-        if isinstance(loss, dict):
-            loss_value = loss.get('loss')
-            if loss_value is not None:
-                loss_value.backward()
-        else:
-            loss.backward()
+    #     # 포워드 및 백워드 패스 수행
+    #     loss = self.model(x, x_len, y)
+    #     if isinstance(loss, dict):
+    #         loss_value = loss.get('loss')
+    #         if loss_value is not None:
+    #             loss_value.backward()
+    #     else:
+    #         loss.backward()
         
-        # 사용/미사용 파라미터 확인
-        used_params = []
-        unused_params = []
+    #     # 사용/미사용 파라미터 확인
+    #     used_params = []
+    #     unused_params = []
         
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                if param.grad is None:
-                    unused_params.append(name)
-                else:
-                    # 그래디언트가 0이 아닌 요소가 있는지 확인
-                    if param.grad.abs().sum().item() > 0:
-                        used_params.append(name)
-                    else:
-                        unused_params.append(name)
+    #     for name, param in self.model.named_parameters():
+    #         if param.requires_grad:
+    #             if param.grad is None:
+    #                 unused_params.append(name)
+    #             else:
+    #                 # 그래디언트가 0이 아닌 요소가 있는지 확인
+    #                 if param.grad.abs().sum().item() > 0:
+    #                     used_params.append(name)
+    #                 else:
+    #                     unused_params.append(name)
         
-        print(f"\n===== 총 파라미터 수: {len(param_status_before)} =====")
-        print(f"사용된 파라미터 수: {len(used_params)} ({len(used_params)/len(param_status_before):.2%})")
-        print(f"미사용 파라미터 수: {len(unused_params)} ({len(unused_params)/len(param_status_before):.2%})")
+    #     print(f"\n===== 총 파라미터 수: {len(param_status_before)} =====")
+    #     print(f"사용된 파라미터 수: {len(used_params)} ({len(used_params)/len(param_status_before):.2%})")
+    #     print(f"미사용 파라미터 수: {len(unused_params)} ({len(unused_params)/len(param_status_before):.2%})")
         
-        # 미사용 파라미터 출력 (선택적으로 사용)
-        if unused_params:
-            print("\n미사용 파라미터 목록:")
-            for name in unused_params:
-                print(f"- {name}")
+    #     # 미사용 파라미터 출력 (선택적으로 사용)
+    #     if unused_params:
+    #         print("\n미사용 파라미터 목록:")
+    #         for name in unused_params:
+    #             print(f"- {name}")
         
-        # 모델 구조별 사용/미사용 파라미터 비율 분석
-        module_stats = {}
-        for name in param_status_before.keys():
-            # 모듈 이름 추출 (첫 번째 dot까지)
-            module_name = name.split('.')[0] if '.' in name else 'base'
+    #     # 모델 구조별 사용/미사용 파라미터 비율 분석
+    #     module_stats = {}
+    #     for name in param_status_before.keys():
+    #         # 모듈 이름 추출 (첫 번째 dot까지)
+    #         module_name = name.split('.')[0] if '.' in name else 'base'
             
-            if module_name not in module_stats:
-                module_stats[module_name] = {'used': 0, 'unused': 0, 'total': 0}
+    #         if module_name not in module_stats:
+    #             module_stats[module_name] = {'used': 0, 'unused': 0, 'total': 0}
             
-            module_stats[module_name]['total'] += 1
-            if name in used_params:
-                module_stats[module_name]['used'] += 1
-            else:
-                module_stats[module_name]['unused'] += 1
+    #         module_stats[module_name]['total'] += 1
+    #         if name in used_params:
+    #             module_stats[module_name]['used'] += 1
+    #         else:
+    #             module_stats[module_name]['unused'] += 1
         
-        print("\n모듈별 파라미터 사용 현황:")
-        for module_name, stats in module_stats.items():
-            used_percent = stats['used'] / stats['total'] * 100 if stats['total'] > 0 else 0
-            print(f"{module_name}: {stats['used']}/{stats['total']} 사용 ({used_percent:.1f}%)")
+    #     print("\n모듈별 파라미터 사용 현황:")
+    #     for module_name, stats in module_stats.items():
+    #         used_percent = stats['used'] / stats['total'] * 100 if stats['total'] > 0 else 0
+    #         print(f"{module_name}: {stats['used']}/{stats['total']} 사용 ({used_percent:.1f}%)")
         
-        # 그래디언트 초기화
-        self.model.zero_grad()
+    #     # 그래디언트 초기화
+    #     self.model.zero_grad()
         
-        return used_params, unused_params
+    #     return used_params, unused_params
     
+    
+    def log_text(self, key: str, value: str, step: int):
+        """
+        WandB에 텍스트를 로깅하기 위한 헬퍼 함수.
+        PyTorch Lightning의 logger.experiment를 통해 WandB API에 접근합니다.
+        """
+        if self.logger and hasattr(self.logger, "experiment") and isinstance(self.logger.experiment, wandb.sdk.wandb_run.Run):
+            # self.logger.experiment는 WandB Run 객체입니다.
+            # wandb.log()를 사용하여 텍스트를 로깅합니다.
+            self.logger.experiment.log({key: value}, step=step)
+        else:
+            # WandB 로거가 활성화되지 않았거나 다른 로거를 사용하는 경우 콘솔에 출력
+            print(f"Log (Step {step}) - {key}: {value}")

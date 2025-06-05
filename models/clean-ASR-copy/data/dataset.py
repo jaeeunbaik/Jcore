@@ -276,7 +276,5 @@ class Dataset(Dataset):
             
         # Process target text
         target = self.token_processor(item['text'])
-        target_len = len(target)
-        
-        return features.squeeze(0).transpose(0, 1), feat_len, target, target_len
+        return features.squeeze(0).transpose(0, 1), feat_len, target
 

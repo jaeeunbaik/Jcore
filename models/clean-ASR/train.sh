@@ -1,4 +1,4 @@
-export PYTHONPATH=/home/hdd2/jenny/Self-Distillation-ASR:$PYTHONPATH 
-# CUDA_VISIBLE_DEVICES=0,1,2,3 
-python ./trainer.py --config ./config.yaml \
-        --mode train
+export PYTHONPATH=/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASRR:$PYTHONPATH 
+python ./trainer.py --config /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/models/clean-ASR/config.yaml \
+                    --mode train \
+                    --ckpt None

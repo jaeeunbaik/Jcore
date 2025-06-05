@@ -1,9 +1,12 @@
 
 import torch
 import numpy as np
+import math
 
 from distutils.version import LooseVersion
 from itertools import groupby
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 is_torch_1_2_plus = LooseVersion(torch.__version__) >= LooseVersion("1.2.0")
 # LooseVersion('1.2.0') == LooseVersion(torch.__version__) can't include e.g. 1.2.0+aaa
@@ -14,6 +17,7 @@ datatype = torch.bool if is_torch_1_2_plus else torch.uint8
 
 
 def subsequent_mask(size, device="cpu", dtype=datatype):
+    
     """Create mask for subsequent steps (1, size, size).
 
     :param int size: size of mask
@@ -433,3 +437,13 @@ class AttrDict(dict):
         for key, value in self.items():
             if isinstance(value, dict):
                 self[key] = AttrDict(value)
+                
+if __name__=='__main__':
+    lengths = [5, 3, 2]
+    mask = make_non_pad_mask(lengths)
+    print(f"Lengths: {lengths}\nMask (no xs): \n{mask}\n")
+    
+    lengths_tensor = torch.tensor([5, 3, 2])
+    xs_example = torch.zeros((3, 6, 4))
+    mask_with_xs_dim1 = make_non_pad_mask(lengths_tensor, xs=xs_example, length_dim=1)
+    print(f"Lengths: {lengths_tensor}, xs_shape: {xs_example.shape}, length_dim=1\nMask:\n{mask_with_xs_dim1}\n")
