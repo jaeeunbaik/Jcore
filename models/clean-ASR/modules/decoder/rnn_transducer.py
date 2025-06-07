@@ -67,12 +67,6 @@ class Predictor(torch.nn.Module):
             return
             
         """
-        # embed_out = self.embed(y)
-        # embed_out = self.embed_dropout(embed_out)
-        # rnn_out, (h, c) = self.rnn(embed_out, states)
-        # out = self.output_linear(rnn_out)
-        
-        # return out, (h, c)
         embedded = self.embed(y)
 
         if y_lengths is not None:
@@ -118,36 +112,3 @@ class Joiner(torch.nn.Module):
         return output
     
     
-# class Joiner(torch.nn.Module):
-#     def __init__(self, encoder_output_dim, predictor_output_dim, output_dim, joiner_hidden_dim=512):
-#         super(Joiner, self).__init__()
-#         self.encoder_output_dim = encoder_output_dim # C
-#         self.predictor_output_dim = predictor_output_dim # D_pred
-#         self.output_dim = output_dim # Vocab_size (odim)
-#         self.joiner_hidden_dim = joiner_hidden_dim # 중간 결합 차원 (e.g., 256 or 512)
-
-#         # self.linear_enc = nn.Linear(self.encoder_output_dim, self.joiner_hidden_dim)
-#         # self.linear_pred = nn.Linear(self.predictor_output_dim, self.joiner_hidden_dim)
-#         # self.output_linear = nn.Linear(self.joiner_hidden_dim, self.output_dim)
-#         self.fc = nn.Sequential(
-#             nn.Linear(encoder_output_dim << 1, encoder_output_dim),
-#             nn.Tanh(),
-#             nn.Linear(encoder_output_dim, output_dim, bias=False),
-#         )
-        
-        
-#     def forward(self, enc_out, dec_out):
-#         if enc_out.dim() == 3 and dec_out.dim() == 3:
-#             input_length = enc_out.size(1)
-#             target_length = dec_out.size(1)
-
-#             enc_out = enc_out.unsqueeze(2)
-#             dec_out = dec_out.unsqueeze(1)
-
-#             enc_out = enc_out.repeat([1, 1, target_length, 1])
-#             dec_out = dec_out.repeat([1, input_length, 1, 1])
-
-#         outputs = torch.cat((enc_out, dec_out), dim=-1)
-#         outputs = self.fc(outputs)
-
-#         return outputs

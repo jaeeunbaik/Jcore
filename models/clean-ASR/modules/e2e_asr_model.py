@@ -183,6 +183,7 @@ class e2eASR(nn.Module):
             max_effective_hs_length = hs_lengths.max().item()
             if logits.shape[1] > max_effective_hs_length:
                 logits = logits[:, :max_effective_hs_length, :, :]
+                
             special_ids = [self.ignore_id, self.sos, self.eos, self.blank] 
             
             ys_actual_sequences = [] # List of lists, each containing non-special tokens

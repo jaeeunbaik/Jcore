@@ -10,6 +10,8 @@ import librosa
 import scipy.signal as ss
 
 from torch.utils.data import Dataset
+import torch.nn.functional as F
+import torchaudio.functional as AF
 from torchaudio.transforms import MelSpectrogram, Resample, SpeedPerturbation
 from torchaudio.transforms import TimeMasking, FrequencyMasking
 from typing import Dict, List, Optional, Tuple
@@ -183,43 +185,48 @@ class Dataset(Dataset):
     
     
     def _apply_rir_mixing(self, waveform):
-        print("Before rir mixing :", waveform.shape)
-        """
-        Apply Room Impulse Response convolution
-        
-        Args:
-            waveform: Input audio tensor [1, T]
-            
-        Returns:
-            Reverberated audio tensor with same shape as input [1, T]
-        """
+        # waveform: [1, T] tensor
         if self.rir_data and random.random() < self.rir_prob:
-            # Select random RIR from available ones
-            rir = random.choice(self.rir_data)
-            
-            # Convert waveform tensor to numpy for convolution
-            waveform_np = waveform.numpy()
-            
-            # Ensure the RIR is a 1D array for convolution
-            if len(rir.shape) > 1:
-                rir = rir.flatten()
-            
-            # Apply convolution for each channel=
-            temp = ss.convolve(waveform_np[0], rir, mode='full')
-            
-            # Trim to original length
-            temp = temp[:waveform_np.shape[1]]
-            
-            # Normalize to prevent clipping
-            if np.max(np.abs(temp)) > 1e-6:  # Avoid division by zero
-                temp = temp / np.max(np.abs(temp)) * np.max(np.abs(waveform_np))
-            
-            reverberated = np.expand_dims(temp, axis=0)
-            
-            # Convert back to tensor
-            return torch.from_numpy(reverberated).to(waveform.dtype)
-        
-        # If no RIR mixing, return original waveform
+            rir_np = random.choice(self.rir_data) # numpy array
+            rir_tensor = torch.from_numpy(rir_np).to(waveform.device).to(waveform.dtype)
+
+            # RIR이 1D여야 함. 필요 시 flatten
+            if len(rir_tensor.shape) > 1:
+                rir_tensor = rir_tensor.flatten()
+
+            # 배치 차원을 추가하여 [1, 1, T_rir] 형태로 만듦 (conv1d를 위해)
+            # kernel_size는 rir의 길이
+            rir_tensor = rir_tensor.unsqueeze(0).unsqueeze(0) # [1, 1, RIR_len]
+
+            # waveform에 배치 차원과 채널 차원 추가 [1, 1, T_waveform]
+            input_waveform = waveform.unsqueeze(0) # [1, 1, T_waveform]
+
+            padding_needed = rir_tensor.shape[-1] - 1
+            padded_waveform = F.pad(input_waveform, (padding_needed, padding_needed))
+
+            # PyTorch conv1d 사용 (GPU에서 연산)
+            reverberated_full = F.conv1d(padded_waveform, rir_tensor)
+
+            if AF.CONV_AVAILABLE: # torchaudio 0.10.0 이상에서만 사용 가능
+                reverberated = AF.convolve(waveform, rir_tensor.squeeze(0), mode='full')
+                start_idx = (reverberated.shape[-1] - waveform.shape[-1]) // 2
+                reverberated = reverberated[:, start_idx : start_idx + waveform.shape[-1]]
+            else: # Fallback to numpy if torchaudio.functional.convolve not available or not desired
+                waveform_np = waveform.numpy()
+                if len(rir_np.shape) > 1:
+                    rir_np = rir_np.flatten()
+                temp = ss.convolve(waveform_np[0], rir_np, mode='full')
+                temp = temp[:waveform_np.shape[1]] # Trimmed to original length
+                if np.max(np.abs(temp)) > 1e-6:
+                    temp = temp / np.max(np.abs(temp)) * np.max(np.abs(waveform_np))
+                reverberated = np.expand_dims(temp, axis=0)
+                return torch.from_numpy(reverberated).to(waveform.dtype).to(waveform.device)
+
+            if reverberated.abs().max() > 1e-6:
+                reverberated = reverberated / reverberated.abs().max() * waveform.abs().max()
+
+            return reverberated
+
         return waveform
           
     def _apply_specaugment(self, spec):
