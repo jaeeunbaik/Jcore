@@ -156,75 +156,112 @@ class e2eASR(nn.Module):
             # for visualization
             if not self.training:
                 self.ctc.softmax(hs_pad)
-        
+
         # 4. rnnt loss
         if self.decoder_type == 'rnnt':
             batch_size = xs_pad.size(0)
             current_device = xs_pad.device
             
-            zeros = torch.zeros((batch_size, 1)).to(device=current_device)
-            # rnnt loss 계산을 위한 padding 되지 않은 ys
-            special_ids = [self.ignore_id, self.sos, self.eos, self.blank] # self.blank 포함
-            ys_actual_sequences = []
-            for y_seq_tensor in ys_pad: 
-                current_actual_seq = []
-                for token_id in y_seq_tensor.tolist():
-                    if token_id not in special_ids: # 특수 토큰 필터링 (blank, sos, eos, ignore_id 모두 제거)
-                        current_actual_seq.append(token_id)
-                ys_actual_sequences.append(current_actual_seq)
-                
-            targets = torch.cat((zeros, ys_pad), dim=1).to(
-                device=current_device, dtype=torch.int
-            )
-            target_lengths = (ylens + 1).to(device=current_device)
-            pred, _ = self.predictor(y=targets, y_lengths=target_lengths)
-            logits = self.joiner(hs_pad, pred)
+            # RNN-T loss의 targets는 blank를 제외한 실제 레이블 시퀀스입니다.
+            # Predictor의 입력 y는 (blank) + target_tokens 형태입니다.
+            # 하지만 torchaudio.functional.rnnt_loss는 내부적으로 이를 처리합니다.
+            # 따라서 Predictor에 전달할 targets는 그대로 ys_pad를 사용하고,
+            # ylens는 원래 ys_pad의 길이를 사용합니다.
+            # RNNT loss의 targets는 blank, sos, eos, ignore_id 모두를 제거한 순수 레이블 시퀀스여야 합니다.
+
+            special_ids_for_rnnt_target = [self.ignore_id, self.sos, self.eos, self.blank] 
             
-            max_effective_hs_length = hs_lengths.max().item()
-            if logits.shape[1] > max_effective_hs_length:
-                logits = logits[:, :max_effective_hs_length, :, :]
-                
-            special_ids = [self.ignore_id, self.sos, self.eos, self.blank] 
+            rnnt_targets_list = []  # rnnt 에는 특수 토큰을 제거한 순수 레이블 시퀀스여야함.
+            rnnt_target_lengths_list = []
+
+            for y_seq_tensor, current_ylen in zip(ys_pad, ylens):
+                actual_seq = [
+                    token_id for token_id in y_seq_tensor[:current_ylen].tolist()
+                    if token_id not in special_ids_for_rnnt_target
+                ]
+                rnnt_targets_list.append(actual_seq)
+                rnnt_target_lengths_list.append(len(actual_seq))
             
-            ys_actual_sequences = [] # List of lists, each containing non-special tokens
-            actual_target_lengths = [] # Corresponding lengths for rnnt_loss targets
+            max_rnnt_target_len = max(rnnt_target_lengths_list) if rnnt_target_lengths_list else 0
 
-            # `ys_pad`의 각 시퀀스를 `ylens`에 주어진 길이까지 탐색
-            for y_seq_tensor, current_ylen in zip(ys_pad, ylens): 
-                current_actual_seq = []
-                # 현재 시퀀스의 실제 길이까지만 순회하며 특수 토큰 제거
-                for token_id in y_seq_tensor[:current_ylen].tolist(): 
-                    if token_id not in special_ids: 
-                        current_actual_seq.append(token_id)
-                ys_actual_sequences.append(current_actual_seq)
-                actual_target_lengths.append(len(current_actual_seq)) # 특수 토큰 제외 후 실제 길이 저장
-
-            max_len_for_rnnt_targets = max(actual_target_lengths) if actual_target_lengths else 0
-
-            targets_for_rnnt_loss_input = torch.full(
-                (batch_size, max_len_for_rnnt_targets), 
-                fill_value=self.blank, 
+            targets_for_rnnt_loss = torch.full(
+                (batch_size, max_rnnt_target_len),
+                fill_value=self.blank, # rnnt_loss의 targets에는 blank가 포함되지 않지만, 패딩값은 blank로 해도 무방
+                                        # 중요한 것은 rnnt_loss가 blank 인덱스를 알고 있다는 것.
+                                        # 다른 패딩 ID를 쓰는 것이 더 명확할 수 있습니다.
                 dtype=torch.int32,
                 device=current_device
             )
-            for i, actual_seq in enumerate(ys_actual_sequences):
-                if len(actual_seq) > 0: # 빈 시퀀스인 경우 슬라이싱 오류 방지
-                    targets_for_rnnt_loss_input[i, :len(actual_seq)] = torch.tensor(
-                        actual_seq, 
-                        dtype=torch.int32, 
+            for i, seq in enumerate(rnnt_targets_list):
+                if len(seq) > 0:
+                    targets_for_rnnt_loss[i, :len(seq)] = torch.tensor(
+                        seq,
+                        dtype=torch.int32,
                         device=current_device
                     )
-            logits = logits.contiguous()
-            # --- rnnt_loss 호출 ---
-            loss_rnnt = torchaudio.functional.rnnt_loss(
-            logits=logits,
-            targets=targets_for_rnnt_loss_input, # `ys_actual_sequences`로 채워진 텐서
-            logit_lengths=hs_lengths, # 인코더 실제 길이
-            target_lengths=torch.tensor(actual_target_lengths, dtype=torch.int32, device=current_device), # `targets`에 해당하는 실제 길이
-            blank=self.blank,
-            reduction="sum"
-            )
+            
+            target_lengths_for_rnnt_loss = torch.tensor(rnnt_target_lengths_list, dtype=torch.int32, device=current_device)
 
+
+            # Step 2: Predictor와 Joiner를 사용하여 logits 생성
+            # Predictor는 일반적으로 target 시퀀스의 시작에 blank를 추가하여 (U+1) 길이를 입력받는 구조입니다.
+            # rnnt_loss 내부에서는 이 부분을 처리해주지만, 모델의 Predictor와 Joiner는 명시적으로 (U+1) 차원을 만들어야 합니다.
+            # Predictor의 입력은 (B, U) 형태의 targets_for_rnnt_loss 이고, 출력은 (B, U, D_pred)입니다.
+            # Joiner는 (B, T, D_enc)와 (B, U, D_pred)를 받아서 (B, T, U, V) 형태를 반환합니다.
+            # 이 (B, T, U, V) 형태는 torchaudio.functional.rnnt_loss의 logit 입력과 일치하지 않습니다.
+            # torchaudio의 rnnt_loss는 logit의 세 번째 차원이 U+1이어야 합니다.
+            # 즉, Predictor가 (B, U+1, D_pred) 형태의 출력을 생성해야 합니다.
+
+            # 이를 위해, Predictor에 입력할 타겟 시퀀스 앞에 blank 토큰을 추가합니다.
+            # Predictor는 이 blank 토큰을 포함하여 (U+1) 길이의 시퀀스에 대한 예측을 수행해야 합니다.
+            # rnnt_loss의 관점에서, Predictor의 입력은 (blank, y_1, ..., y_U) 입니다.
+            # 따라서 Predictor에 전달할 `y`는 `targets_for_rnnt_loss` 앞에 `blank`를 추가한 형태여야 합니다.
+            
+            # Predictor의 입력 y: targets_for_rnnt_loss 앞에 self.blank 토큰 추가
+            # `targets_for_rnnt_loss`는 이미 max_rnnt_target_len으로 패딩되어 있음.
+            # 각 시퀀스의 시작에 blank를 추가합니다.
+            zeros_for_predictor = torch.full((batch_size, 1), self.blank, dtype=torch.int32, device=current_device)
+            predictor_input_y = torch.cat((zeros_for_predictor, targets_for_rnnt_loss), dim=1)
+            predictor_input_y_lengths = target_lengths_for_rnnt_loss + 1 # 길이도 1 증가
+
+            pred, _ = self.predictor(y=predictor_input_y, y_lengths=predictor_input_y_lengths)
+            # pred의 차원: (B, max_rnnt_target_len + 1, D_pred)
+            
+            # Joiner는 (B, T, D_enc)와 (B, U+1, D_pred)를 받아서
+            # (B, T, U+1, V) 형태의 logit을 생성해야 합니다.
+            logits = self.joiner(hs_pad, pred) 
+            # hs_pad (B, T, D_enc) -> unsqueeze(2) -> (B, T, 1, D_enc)
+            # pred (B, U+1, D_pred) -> unsqueeze(1) -> (B, 1, U+1, D_pred)
+            # logit = (B, T, U+1, D_join)
+
+            # rnnt_loss의 logit_lengths는 hs_lengths를 사용.
+            # rnnt_loss의 target_lengths는 target_lengths_for_rnnt_loss (U)를 사용.
+            # logits의 T 차원과 U+1 차원이 각각 logit_lengths와 target_lengths에 맞춰져야 합니다.
+            
+            # logit의 T 차원 자르기 (logit_lengths에 맞춰)
+            max_hs_length_in_batch = hs_lengths.max().item()
+            if logits.shape[1] > max_hs_length_in_batch:
+                logits = logits[:, :max_hs_length_in_batch, :, :]
+            
+            # logit의 U+1 차원 자르기 (target_lengths + 1에 맞춰)
+            # rnnt_loss는 targets의 최대 길이 U에 1을 더한 차원 U+1을 기대합니다.
+            max_predictor_output_len = predictor_input_y_lengths.max().item()
+            if logits.shape[2] > max_predictor_output_len:
+                logits = logits[:, :, :max_predictor_output_len, :]
+
+            logits = logits.contiguous() 
+            
+            loss_rnnt = torchaudio.functional.rnnt_loss(
+                logits=logits,
+                targets=targets_for_rnnt_loss, # blank, sos, eos, ignore_id 제거된 실제 토큰 ID 시퀀스 (U 길이)
+                logit_lengths=hs_lengths, # 인코더 출력의 실제 길이 (T)
+                target_lengths=target_lengths_for_rnnt_loss, # RNN-T targets의 실제 길이 (U)
+                blank=self.blank,
+                reduction="sum"
+            )
+            loss_att = None
+            self.acc = None
+            
             
         # 5. compute cer/wer
         if self.training or self.error_calculator is None or self.decoder is None:
@@ -312,7 +349,7 @@ class e2eASR(nn.Module):
                     lexicon=files.lexicon,
                     tokens=files.tokens,
                     lm=None,  # files.lm
-                    nbest=3,
+                    nbest=self.decoder_config.beam_size,
                     beam_size=beam_size,
                     lm_weight=lm_weight,
                     word_score=word_score
@@ -341,8 +378,14 @@ class e2eASR(nn.Module):
                     raise ValueError(f'Unsupported decoding method: {self.decoder_config.decoding_method}')
                 
                 # 디코딩 결과 저장
-                hyps.append(sp.decode(hyp).split())
-            
+                # hyps.append(sp.decode(hyp).split())
+                # ... 이전 코드 ...
+                # 디코딩 결과 저장
+                # sp.decode(hyp)는 토큰 ID 리스트를 원래 문자열로 변환합니다.
+                # SentencePiece의 default prefix가 ' ' (U+2581)이므로,
+                # 이를 일반 공백으로 대체하고 .strip()으로 앞뒤 공백을 제거합니다.
+                decoded_text = sp.decode(hyp).replace(" ", " ").strip()
+                hyps.append(decoded_text.split()) # 단어 단위로 분리하여 List[List[str]] 유지
             # 결과 반환
             if self.decoder_config.decoding_method == 'greedy_search':
                 return {'greedy_search': hyps}

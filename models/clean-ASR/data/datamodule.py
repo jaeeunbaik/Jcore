@@ -110,7 +110,7 @@ class ASRDataModule(pl.LightningDataModule):
         padded_targets = torch.nn.utils.rnn.pad_sequence(
             targets,
             batch_first=True,
-            padding_value=0 # 0 또는 모델의 ignore_id에 맞는 값 (토크나이저의 pad_id)
+            padding_value=-1 # 0 또는 모델의 ignore_id에 맞는 값 (토크나이저의 pad_id)
         )
         target_lengths = torch.tensor(target_lengths)
 

@@ -110,42 +110,81 @@ class ModelModule(pl.LightningModule):
             
             predicted_transcriptions: List[str] = []
 
-            if isinstance(decoded_raw_output, list):
-                if all(isinstance(d, str) for d in decoded_raw_output):
+            # decoded_raw_output의 타입에 따라 처리
+            if self.model.decoder_type == 'ctc':
+                # CTC decoder (greedy/beamsearch)는 List[str]을 반환함
+                if isinstance(decoded_raw_output, list) and all(isinstance(d, str) for d in decoded_raw_output):
                     predicted_transcriptions = decoded_raw_output
                 else:
-                    logging.warning(f"Decoded output is a list but not List[str]. Type: {type(decoded_raw_output[0]) if decoded_raw_output else 'empty'}")
+                    logging.warning(f"CTC decoded output is not List[str]. Type: {type(decoded_raw_output)}")
                     predicted_transcriptions = [""] * len(x)
 
-            elif isinstance(decoded_raw_output, dict):
-                if decoded_raw_output:
-                    # 딕셔너리 값은 List[List[str]] 형태입니다.
-                    first_key_value = next(iter(decoded_raw_output.values())) 
-                    
+            elif self.model.decoder_type == 'rnnt':
+                # RNN-T decoder는 딕셔너리 형태를 반환함 (예: {'greedy_search': [['word1', 'word2'], ['word3']]})
+                if isinstance(decoded_raw_output, dict) and decoded_raw_output:
+                    # 딕셔너리의 첫 번째 값을 가져와서 List[List[str]] 형태인지 확인
+                    first_key_value = next(iter(decoded_raw_output.values()))
                     if isinstance(first_key_value, list) and all(isinstance(s, list) and all(isinstance(w, str) for w in s) for s in first_key_value):
                         # 각 내부 리스트(단어 리스트)를 공백으로 조인하여 하나의 문자열로 만듭니다.
                         predicted_transcriptions = [" ".join(word_list) for word_list in first_key_value]
-                    elif isinstance(first_key_value, list) and all(isinstance(s, str) for s in first_key_value):
-                        # 이미 List[str] 형태인 경우 (이 경우는 발생하지 않을 가능성이 높음)
-                        predicted_transcriptions = first_key_value
                     else:
-                        logging.warning(f"Decoded output dict value is not List[List[str]] or List[str]. Actual type: {type(first_key_value)}")
+                        logging.warning(f"RNN-T decoded output dict value is not List[List[str]]. Actual type: {type(first_key_value)}")
                         predicted_transcriptions = [""] * len(x)
                 else:
-                    logging.warning("Decoded output is an empty dictionary.")
+                    logging.warning("RNN-T decoded output is an empty dictionary or not a dict.")
                     predicted_transcriptions = [""] * len(x)
-            else:
-                logging.warning(f"Unsupported decoded output type: {type(decoded_raw_output)}")
-                predicted_transcriptions = [""] * len(x) 
 
-            # Ground Truth 텍스트 변환
+            elif self.model.decoder_type == 'transformer':
+                # Transformer decoder는 List[str]을 반환함 (greedy/beamsearch)
+                if isinstance(decoded_raw_output, list) and all(isinstance(d, str) for d in decoded_raw_output):
+                    predicted_transcriptions = decoded_raw_output
+                else:
+                    logging.warning(f"Transformer decoded output is not List[str]. Type: {type(decoded_raw_output)}")
+                    predicted_transcriptions = [""] * len(x)
+            
+            else:
+                logging.warning(f"Unsupported decoder type: {self.model.decoder_type}. Decoded output type: {type(decoded_raw_output)}")
+                predicted_transcriptions = [""] * len(x)
+            
+            
+            # predicted_transcriptions: List[str] = []
+
+            # if isinstance(decoded_raw_output, list):
+            #     if all(isinstance(d, str) for d in decoded_raw_output):
+            #         predicted_transcriptions = decoded_raw_output
+            #     else:
+            #         logging.warning(f"Decoded output is a list but not List[str]. Type: {type(decoded_raw_output[0]) if decoded_raw_output else 'empty'}")
+            #         predicted_transcriptions = [""] * len(x)
+
+            # elif isinstance(decoded_raw_output, dict):
+            #     if decoded_raw_output:
+            #         # 딕셔너리 값은 List[List[str]] 형태입니다.
+            #         first_key_value = next(iter(decoded_raw_output.values())) 
+                    
+            #         if isinstance(first_key_value, list) and all(isinstance(s, list) and all(isinstance(w, str) for w in s) for s in first_key_value):
+            #             # 각 내부 리스트(단어 리스트)를 공백으로 조인하여 하나의 문자열로 만듭니다.
+            #             predicted_transcriptions = [" ".join(word_list) for word_list in first_key_value]
+            #         elif isinstance(first_key_value, list) and all(isinstance(s, str) for s in first_key_value):
+            #             # 이미 List[str] 형태인 경우 (이 경우는 발생하지 않을 가능성이 높음)
+            #             predicted_transcriptions = first_key_value
+            #         else:
+            #             logging.warning(f"Decoded output dict value is not List[List[str]] or List[str]. Actual type: {type(first_key_value)}")
+            #             predicted_transcriptions = [""] * len(x)
+            #     else:
+            #         logging.warning("Decoded output is an empty dictionary.")
+            #         predicted_transcriptions = [""] * len(x)
+            # else:
+            #     logging.warning(f"Unsupported decoded output type: {type(decoded_raw_output)}")
+            #     predicted_transcriptions = [""] * len(x) 
+
+            # # Ground Truth 텍스트 변환
             reference_transcriptions: List[str] = []
             for i in range(len(y)):
                 gt_tokens = y[i].tolist()
                 gt_text = self.token_processor.id2text(gt_tokens, filter_blank=True)
                 reference_transcriptions.append(gt_text)
             
-            # 텍스트 전처리 (WER 계산을 위해 공통적으로 수행)
+            # # 텍스트 전처리 (WER 계산을 위해 공통적으로 수행)
             try:
                 processed_predicted_transcriptions = [preprocess_text(text) for text in predicted_transcriptions]
                 processed_reference_transcriptions = [preprocess_text(text) for text in reference_transcriptions]
@@ -218,7 +257,7 @@ class ModelModule(pl.LightningModule):
             logits = self.student_model.encode(x, x_len)
             decoded_trans = self.student_model.recognize(logits)
         else:
-            decoded_trans = self.model.recognize(x, x_len, y, self.model_config.decoder)
+            decoded_trans = self.model.recognize(x, x_len, y, y_len, self.model_config.decoder)
 
         ref_trans: List[str] = []
         for single_y_tokens in y:

@@ -46,7 +46,6 @@ model:
       ff_dropout_p: 0.1
       attention_heads: 4
       att_dropout_p: 0.1
-      linear_units: 1024
       cnn_module_kernel: 31
       conv_expansion_factor: 2
       conv_batchnorm: True  # True: Batch normalization in ConvModule, else LayerNorm
@@ -55,13 +54,12 @@ model:
     decoder:
       decoding_method: "beamsearch"  # greedy, beamsearch
       lm_fld: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/lm/librispeech/librispeech-4-gram
-      beam_size: 5  # if ctc only, decoding method is greedy search (= no beam search)
+      beam_size: 10  # if ctc only, decoding method is greedy search (= no beam search)
       penalty: 0.3  # < 0: 너무 짧은 출력 억제, 0.0 ~ 0.2 : 일반적인 ASR, 0.3 이상: 너무 긴 출력 억제
       minlenratio: 0.1
       maxlenratio: 1.0 # 디코딩 출력의 최대 길이, len(encoder) * maxlenratio
       rnnlm: false
       lm_weight: 0.2
-      nbest: 5  # beam search 결과 중에서 몇 개 가져올 지 결정
       type: "rnnt"  # ctc, rnnt, transformer, hybrid
       ctc_type: "builtin"  # builtin, cudnnctc, gtnctc
       ctc_weight: 0.0
@@ -91,7 +89,7 @@ trainer:
   proj: "Clean-ASR"
   exp_name: "rnnt decoder"
   log_dir: "logs"
-  num_epochs: 80
+  num_epochs: 100
   weight_decay: 1e-6
   warmup_epochs: 10
   precision: 32
@@ -110,7 +108,7 @@ checkpoint:
   model_save_path: "models/clean_ASR.pth"
 optimizer:
   type: "AdamW"
-  op_lr: 5e-6
+  op_lr: 0.8  # 5e-4
   max_epochs: 100
   warmup_steps: 10000
   scheduling_type: "lambda"  # cosine-annealing, warmup, lambda

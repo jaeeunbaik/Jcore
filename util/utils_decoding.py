@@ -330,8 +330,7 @@ def rnnt_beam_search(ylens, predictor, joiner, encoder_out: torch.Tensor, beam_s
     beams = [{"score": 0.0, "tokens": initial_tokens, "states": None}] 
 
     time_steps = encoder_out.size(1)
-    # 최대 디코딩 길이를 인코더 출력 길이의 2배 정도로 설정 (필요에 따라 조절)
-    max_decode_steps = int(time_steps) 
+    max_decode_steps = int(time_steps) * 2
 
     for t in range(time_steps):
   

@@ -93,22 +93,37 @@ class Joiner(torch.nn.Module):
     '''
     def __init__(self, input_dim, output_dim):
         super(Joiner, self).__init__()
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.output_linear = nn.Linear(self.input_dim, self.output_dim)
-        
+        self.input_dim = input_dim  # 256
+        self.output_dim = output_dim  # 256
+        # self.output_linear = nn.Linear(self.input_dim, self.output_dim)
+        self.fc = nn.Sequential(
+            nn.Linear(input_dim << 1, input_dim),
+            nn.Tanh(),
+            nn.Linear(input_dim, output_dim, bias=False),
+        )
     def forward(self, enc_out, dec_out):
         '''
-            enc_out : (B, T, c)
-            dec_out : (B, U, C)
+            Input
+                enc_out : (B, T, c)
+                dec_out : (B, U, C)
+            
+            return 
+                output  # (B, T, U, C)
         '''
-        enc_out = enc_out.unsqueeze(2)
-        dec_out = dec_out.unsqueeze(1)
-        logit = enc_out + dec_out
-        logit = torch.tanh(logit)
-        
-        output = self.output_linear(logit)
-        
-        return output
+        if enc_out.dim() == 3 and dec_out.dim() == 3:
+            input_length = enc_out.size(1)
+            target_length = dec_out.size(1)
+
+            enc_out = enc_out.unsqueeze(2)
+            dec_out = dec_out.unsqueeze(1)
+
+            enc_out = enc_out.repeat([1, 1, target_length, 1])
+            dec_out = dec_out.repeat([1, input_length, 1, 1])
+
+        outputs = torch.cat((enc_out, dec_out), dim=-1)
+        outputs = self.fc(outputs)
+
+        return outputs
+
     
     
