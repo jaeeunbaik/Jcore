@@ -1,7 +1,7 @@
 dataloader:
-  batch_size: 10
-  num_workers: 4
-  pin_memory: False
+  batch_size: 4
+  num_workers: 40
+  pin_memory: True
 data:
   scp_dir: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/librispeech/
   sample_rate: 16000
@@ -52,9 +52,9 @@ model:
       conv_dropout_p: 0.1
       half_step_residual: True
     decoder:
-      decoding_method: "beamsearch"  # greedy, beamsearch
+      decoding_method: "greedy"  # greedy, beamsearch
       lm_fld: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/lm/librispeech/librispeech-4-gram
-      beam_size: 10  # if ctc only, decoding method is greedy search (= no beam search)
+      beam_size: 2  # if ctc only, decoding method is greedy search (= no beam search)
       penalty: 0.3  # < 0: 너무 짧은 출력 억제, 0.0 ~ 0.2 : 일반적인 ASR, 0.3 이상: 너무 긴 출력 억제
       minlenratio: 0.1
       maxlenratio: 1.0 # 디코딩 출력의 최대 길이, len(encoder) * maxlenratio
@@ -86,29 +86,29 @@ model:
     target: "encoder"  # encoder, ctc
 
 trainer:
-  proj: "Clean-ASR"
+  proj: "Librispeech"
   exp_name: "rnnt decoder"
   log_dir: "logs"
   num_epochs: 100
   weight_decay: 1e-6
   warmup_epochs: 10
-  precision: 32
+  precision: 16
   accumulate_grad_batches: 4
   gpus: 5
-  gradient_clip_val: 10.0
-  resume_from_checkpoint: false
+  gradient_clip_val: 1.0
+  resume_from_checkpoint: true
   log_every_n_steps: 100
   val_check_interval: 1.0
   strategy: "ddp"  # ddp, ddp_spawn, deepspeed
   reload_dataloaders_every_n_epochs: 4
-  ckpt_path: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/models/clean-ASR/models/epoch=12-val_wer=3.5461.ckpt
+  ckpt_path: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/models/clean-ASR/models/epoch=64-val_wer=0.1729.ckpt
 checkpoint:
   checkpoint_monitor: "val_loss"
   save_top_k: -1  # all models are saved
   model_save_path: "models/clean_ASR.pth"
 optimizer:
   type: "AdamW"
-  op_lr: 0.8  # 5e-4
+  op_lr: 0.16  # 1e-4
   max_epochs: 100
   warmup_steps: 10000
   scheduling_type: "lambda"  # cosine-annealing, warmup, lambda

@@ -23,7 +23,7 @@ class TokenProcessor:
         self.sp.load(model_path)
     
     def __call__(self, text: str):
-        ids = self.sp.encode(text, out_type=int)
+        ids = self.sp.encode(text, out_type=int)  # text2id
         return torch.tensor(ids, dtype=torch.long)
     
     def id2text(self, tokens: List[int], filter_blank=False) -> str:

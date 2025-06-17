@@ -32,8 +32,7 @@ class Predictor(torch.nn.Module):
         self.layer_type = layer_type
         self.embed = nn.Embedding(
             num_embeddings=num_embeddings,
-            embedding_dim=output_dim,
-            padding_idx=0,
+            embedding_dim=output_dim
         )
         self.embed_dropout = nn.Dropout(embed_dropout_rate)
         if self.layer_type == 'lstm':
@@ -94,7 +93,7 @@ class Joiner(torch.nn.Module):
     def __init__(self, input_dim, output_dim):
         super(Joiner, self).__init__()
         self.input_dim = input_dim  # 256
-        self.output_dim = output_dim  # 256
+        self.output_dim = output_dim  # 2000
         # self.output_linear = nn.Linear(self.input_dim, self.output_dim)
         self.fc = nn.Sequential(
             nn.Linear(input_dim << 1, input_dim),

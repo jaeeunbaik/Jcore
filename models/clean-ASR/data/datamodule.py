@@ -90,16 +90,9 @@ class ASRDataModule(pl.LightningDataModule):
         # Separate features, lengths, targets, target_lengths
         features, feature_lengths, targets, target_lengths = zip(*batch)
         
-        # Get max lengths
-        max_feat_len = max(feature_lengths)
-        
-        # Prepare padded batch
-        batch_size = len(features)
-        feature_dim = features[0].shape[1]
-        
         # Initialize padded tensors
         padded_features = torch.nn.utils.rnn.pad_sequence(
-            [f for f, _, _, _ in batch], # features만 추출
+            features,
             batch_first=True,
             padding_value=0.0 # 멜 스펙트로그램의 패딩 값
         )
@@ -110,7 +103,7 @@ class ASRDataModule(pl.LightningDataModule):
         padded_targets = torch.nn.utils.rnn.pad_sequence(
             targets,
             batch_first=True,
-            padding_value=-1 # 0 또는 모델의 ignore_id에 맞는 값 (토크나이저의 pad_id)
+            padding_value=0 # 0 또는 모델의 ignore_id에 맞는 값 (토크나이저의 pad_id)
         )
         target_lengths = torch.tensor(target_lengths)
 

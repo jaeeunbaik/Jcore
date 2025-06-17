@@ -63,7 +63,7 @@ class Trainer:
         """Setup training callbacks"""
         callbacks = []
 
-        checkpoint_path = os.path.dirname(self.config.checkpoint.model_save_path)
+        checkpoint_path = os.path.dirname(self.config.trainer.ckpt_path)
         callbacks.append(
             ModelCheckpoint(
                 dirpath=checkpoint_path,

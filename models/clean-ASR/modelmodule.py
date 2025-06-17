@@ -75,15 +75,9 @@ class ModelModule(pl.LightningModule):
                     self.log(key, value, prog_bar=True, sync_dist=True)
             
             return loss.get("loss")
-
-    def on_train_epoch_end(self):
-        # GPU 캐시 메모리 정리
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            print(f"Epoch {self.current_epoch}: Cleared CUDA cache.")
     
     def validation_step(self, batch, batch_idx):
-        x, x_len, y, y_len = batch
+        x, x_len, y, y_len = batch 
         
         self.model.eval()
 
@@ -147,36 +141,6 @@ class ModelModule(pl.LightningModule):
                 predicted_transcriptions = [""] * len(x)
             
             
-            # predicted_transcriptions: List[str] = []
-
-            # if isinstance(decoded_raw_output, list):
-            #     if all(isinstance(d, str) for d in decoded_raw_output):
-            #         predicted_transcriptions = decoded_raw_output
-            #     else:
-            #         logging.warning(f"Decoded output is a list but not List[str]. Type: {type(decoded_raw_output[0]) if decoded_raw_output else 'empty'}")
-            #         predicted_transcriptions = [""] * len(x)
-
-            # elif isinstance(decoded_raw_output, dict):
-            #     if decoded_raw_output:
-            #         # 딕셔너리 값은 List[List[str]] 형태입니다.
-            #         first_key_value = next(iter(decoded_raw_output.values())) 
-                    
-            #         if isinstance(first_key_value, list) and all(isinstance(s, list) and all(isinstance(w, str) for w in s) for s in first_key_value):
-            #             # 각 내부 리스트(단어 리스트)를 공백으로 조인하여 하나의 문자열로 만듭니다.
-            #             predicted_transcriptions = [" ".join(word_list) for word_list in first_key_value]
-            #         elif isinstance(first_key_value, list) and all(isinstance(s, str) for s in first_key_value):
-            #             # 이미 List[str] 형태인 경우 (이 경우는 발생하지 않을 가능성이 높음)
-            #             predicted_transcriptions = first_key_value
-            #         else:
-            #             logging.warning(f"Decoded output dict value is not List[List[str]] or List[str]. Actual type: {type(first_key_value)}")
-            #             predicted_transcriptions = [""] * len(x)
-            #     else:
-            #         logging.warning("Decoded output is an empty dictionary.")
-            #         predicted_transcriptions = [""] * len(x)
-            # else:
-            #     logging.warning(f"Unsupported decoded output type: {type(decoded_raw_output)}")
-            #     predicted_transcriptions = [""] * len(x) 
-
             # # Ground Truth 텍스트 변환
             reference_transcriptions: List[str] = []
             for i in range(len(y)):
@@ -290,38 +254,50 @@ class ModelModule(pl.LightningModule):
             
     def configure_optimizers(self):
         # optimizer
+        # Conformer 논문은 Adam을 사용했으므로, Adam에 베타와 엡실론 값을 명시적으로 넣어주는 것이 좋습니다.
+        # LambdaLR 스케줄러 사용 시, 옵티마이저의 초기 lr은 1.0으로 설정하는 것이 일반적입니다.
+        initial_lr_for_scheduler = 1.0 
+
         if self.optim_config.type == "AdamW":
-            optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, betas=(0.9, 0.98), eps=1e-9, weight_decay=1e-6)
+            optimizer = torch.optim.AdamW(self.parameters(), lr=initial_lr_for_scheduler, betas=(0.9, 0.98), eps=1e-9, weight_decay=1e-6)
         elif self.optim_config.type == "Adam":
-            optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+            optimizer = torch.optim.Adam(self.parameters(), lr=initial_lr_for_scheduler, betas=(0.9, 0.98), eps=1e-9)
             
         # scheduler
         def transformer_lr_schedule(step, d_model, warmup_steps):
             """
             Transformer Learning Rate Schedule.
-
-            Args:
-                step (int): 현재 스텝.
-                d_model (int): 모델의 차원 (hidden size).
-                warmup_steps (int): 워밍업 스텝 수.
-
-            Returns:
-                float: 학습률 스케일링 값.
+            논문: peak learning rate 0.05 / sqrt(d)
             """
             if step == 0:
                 step = 1  # 0으로 나누는 것을 방지
-            scale = d_model ** -0.5
-            return scale * min(step ** -0.5, step * (warmup_steps ** -1.5))
+            
+            # Conformer 논문에 명시된 최고 학습률 (0.05 / sqrt(d))을 정확히 반영
+            # '0.05' 상수를 곱해줘야 합니다.
+            # d_model ** -0.5 == 1 / sqrt(d_model)
+            peak_lr_scale_factor = 0.05 * (d_model ** -0.5) 
+            
+            # 최종 학습률 반환
+            return peak_lr_scale_factor * min(step ** -0.5, step * (warmup_steps ** -1.5))
+
         d_model = self.model_config.encoder.encoder_dim
         warmup_steps = self.optim_config.warmup_steps
+        
         def lr_lambda(step):
+            # LambdaLR은 optimizer의 lr에 이 함수의 반환값을 곱하므로,
+            # transformer_lr_schedule 자체가 절대 학습률을 반환하도록 했습니다.
+            # 따라서 optimizer의 lr을 1.0으로 설정해야 이 스케줄이 제대로 작동합니다.
             return transformer_lr_schedule(step, d_model, warmup_steps)
 
         if self.optim_config.scheduling_type == "cosine-annealing":
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.trainer_config.num_epochs)  # T_max : cosine 주기 한 번 도는데 걸리는
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.trainer_config.num_epochs)
         elif self.optim_config.scheduling_type == "warmup":
+            # 이 "warmup" 타입은 StepLR을 사용하는데, 이는 트랜스포머의 웜업 스케줄과 다릅니다.
+            # Conformer 논문의 스케줄을 사용하려면 'lambda' 타입을 선택해야 합니다.
+            logging.warning("Using 'warmup' scheduling_type with StepLR. This is NOT the Transformer LR schedule described in the Conformer paper. Consider using 'lambda' type.")
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.05)
         elif self.optim_config.scheduling_type == "lambda":
+            # Conformer 논문 스케줄 적용
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
             
         self.scaler = torch.cuda.amp.GradScaler(
@@ -335,20 +311,7 @@ class ModelModule(pl.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "step"
+                "interval": "step" # 'step' 단위로 스케줄러를 업데이트하도록 명시
             }
-        }
-            
+        } 
     
-    def log_text(self, key: str, value: str, step: int):
-        """
-        WandB에 텍스트를 로깅하기 위한 헬퍼 함수.
-        PyTorch Lightning의 logger.experiment를 통해 WandB API에 접근합니다.
-        """
-        if self.logger and hasattr(self.logger, "experiment") and isinstance(self.logger.experiment, wandb.sdk.wandb_run.Run):
-            # self.logger.experiment는 WandB Run 객체입니다.
-            # wandb.log()를 사용하여 텍스트를 로깅합니다.
-            self.logger.experiment.log({key: value}, step=step)
-        else:
-            # WandB 로거가 활성화되지 않았거나 다른 로거를 사용하는 경우 콘솔에 출력
-            print(f"Log (Step {step}) - {key}: {value}")

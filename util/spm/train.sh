@@ -1,8 +1,8 @@
 #!/bin/bash
 # filepath: /home/hdd2/jenny/Self-Distillation-ASR/util/spm/train.sh
 
-nbpe=2000
-bpemode=char
+nbpe=5000
+bpemode=bpe
 mkdir -p ${bpemode}
 dict=${bpemode}/kor_${bpemode}${nbpe}_units.txt
 bpemodel=${bpemode}/kor_${bpemode}${nbpe}
@@ -15,7 +15,7 @@ python spm_train.py \
   --model_type=${bpemode} \
   --character_coverage=1.0 \
   --input_sentence_size=100000000 \
-  --pad_id=-1 \
+  --pad_id=0 \
   --unk_id=1 \
   --bos_id=2 \
   --eos_id=3 \

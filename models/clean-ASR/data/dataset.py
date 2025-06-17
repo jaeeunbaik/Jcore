@@ -30,7 +30,7 @@ class Dataset(Dataset):
         super().__init__()
         self.data_config = data_config
         # Load data paths
-        self.scp_path = self.data_config.scp_dir + f"{subset}.scp"
+        self.scp_path = self.data_config.scp_dir + f"{subset}_token.scp"
         self.items = self._load_scp(self.scp_path)
         
         # Audio processing parameters
@@ -101,10 +101,11 @@ class Dataset(Dataset):
                 item = line.strip().split('|')
                 if len(item) >= 2:
                     audio_path = item[0]
-                    text = item[1]
+                    token = item[1]
+                    token_tensors = torch.tensor(list(map(int, token.split(' '))))
                     items.append({
                         'audio_path': audio_path,
-                        'text': text
+                        'token': token_tensors
                     })
         return items
     
@@ -282,7 +283,10 @@ class Dataset(Dataset):
             features = self._apply_specaugment(features)
             
         # Process target text
-        target = self.token_processor(item['text'])
+        # target = self.token_processor(item['text'])
+        # target_len = len(target)
+        
+        target = item['token']
         target_len = len(target)
         
         return features.squeeze(0).transpose(0, 1), feat_len, target, target_len

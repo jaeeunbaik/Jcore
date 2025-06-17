@@ -88,7 +88,7 @@ class RelativeMultiHeadAttention(nn.Module):
         pos_score = torch.matmul((query + self.v_bias).transpose(1, 2), pos_embedding.permute(0, 2, 3, 1))
         pos_score = self._relative_shift(pos_score)
 
-        score = (content_score + pos_score) / self.sqrt_dim
+        score = (content_score + pos_score) / self.sqrt_dim  # relative MHSA 이기 때문에, 상대적인 position score 를 attention score 에 더해줌.
 
         if mask is not None:
             mask = mask.unsqueeze(1)
