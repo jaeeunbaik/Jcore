@@ -276,7 +276,12 @@ def rnnt_greedy_search(decoder, joiner, encoder_out: torch.Tensor, blank_id, dev
     assert encoder_out.size(0) == 1, encoder_out.size(0)
 
     sos = torch.tensor([blank_id], device=device, dtype=torch.int64).reshape(1, 1)
-    decoder_out, (h, c) = decoder(y=sos)
+    
+    if isinstance(decoder.rnn, torch.nn.LSTM):
+        decoder_out, (h, c) = decoder(y=sos)
+    elif isinstance(decoder.rnn, torch.nn.GRU):
+        decoder_out, h = decoder(y=sos)
+        
     T = encoder_out.size(1)
     t = 0
     hyp = []
@@ -301,7 +306,8 @@ def rnnt_greedy_search(decoder, joiner, encoder_out: torch.Tensor, blank_id, dev
         if y != blank_id:
             hyp.append(y.item())
             y = y.reshape(1, 1)
-            decoder_out, (h, c) = decoder(y=y, states=(h, c))
+            # decoder_out, (h, c) = decoder(y=y, states=(h, c))
+            decoder_out, h = decoder(y=y, states=h)
 
             sym_per_utt += 1
             sym_per_frame += 1
@@ -322,105 +328,6 @@ class TransducerHypothesis:
     # so the state is a tuple (h, c)
     decoder_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
 
-
-# def rnnt_beam_search(ylens, predictor, joiner, encoder_out: torch.Tensor, beam_size, blank_id, device) -> List[int]:
-#     # Initialize beam candidates
-#     # 'tokens'를 처음부터 PyTorch 텐서로 관리
-#     initial_tokens = torch.tensor([blank_id], device=device, dtype=torch.int32)
-#     beams = [{"score": 0.0, "tokens": initial_tokens, "states": None}] 
-
-#     time_steps = encoder_out.size(1)
-#     max_decode_steps = int(time_steps) * 2
-
-#     for t in range(time_steps):
-  
-#         # (beam_size, 1)
-#         current_tokens_batch = torch.cat([b["tokens"][-1:].unsqueeze(0) for b in beams], dim=0) # (beam_size, 1)
-
-#         num_layers_directions = predictor.rnn.num_layers * (2 if predictor.rnn.bidirectional else 1) 
-#         hidden_size = predictor.hidden_dim
-
-#         states_to_concat_h = []
-#         states_to_concat_c = []
-        
-#         for b in beams:
-#             if b["states"] is None:
-#                 # 빔의 상태가 None이면 0으로 초기화된 상태 텐서 생성 (새로운 빔의 초기 상태를 의미)
-#                 states_to_concat_h.append(torch.zeros(num_layers_directions, 1, hidden_size, device=device))
-#                 states_to_concat_c.append(torch.zeros(num_layers_directions, 1, hidden_size, device=device))
-#             else:
-#                 # 빔의 상태가 존재하면 해당 상태를 사용
-#                 states_to_concat_h.append(b["states"][0])
-#                 states_to_concat_c.append(b["states"][1])
-
-#         # 모든 빔의 상태를 배치 형태로 결합하여 Predictor에 전달할 준비
-#         h_batch = torch.cat(states_to_concat_h, dim=1)
-#         c_batch = torch.cat(states_to_concat_c, dim=1)
-#         predictor_input_states = (h_batch, c_batch)
-
-#         # Predictor 호출 (decoder는 rnnt_beam_search의 predictor 인자)
-#         # pred_out_batch: (beam_size, 1, D_pred)
-#         # new_states_batch: (h,c) 튜플, 각 텐서 (num_layers_directions, beam_size, hidden_size)
-#         predictor_y_lengths = torch.ones(current_tokens_batch.size(0), dtype=torch.long, device=device)
-#         pred_out_batch, new_states_batch = predictor(y=current_tokens_batch, y_lengths=predictor_y_lengths, states=predictor_input_states) 
-
-#         new_beams_at_t = []
-#         for i, beam in enumerate(beams):
-#             extracted_states_i = (new_states_batch[0][:, i:i+1, :], new_states_batch[1][:, i:i+1, :])
-
-#             pred_out_i = pred_out_batch[i:i+1] # (1, 1, D_pred)
-#             enc_out_t = encoder_out[:, t:t+1, :] # (1, 1, C)
-
-#             # Joiner 호출
-#             # logits: (1, 1, Vocab_size) 
-#             logits = joiner(enc_out_t, pred_out_i)  
-
-#             log_probs = torch.log_softmax(logits, dim=-1).squeeze() 
-
-#             blank_score = log_probs[blank_id].item() 
-
-#             new_beams_at_t.append({
-#                 "score": beam["score"] + blank_score,
-#                 "tokens": beam["tokens"], # 토큰 시퀀스는 변화 없음
-#                 "states": beam["states"], # Predictor 상태도 변화 없음 (blank 트랜지션)
-#             })
-
-#             # Non-Blank Paths (새로운 토큰 추가, 상태 업데이트)
-#             vocab_size = log_probs.size(-1) 
-#             non_blank_indices = torch.arange(vocab_size, device=device)  # blank 를 제외한 모든 토큰
-#             non_blank_indices = non_blank_indices[non_blank_indices != blank_id]
-            
-#             non_blank_log_probs_filtered = log_probs[non_blank_indices]
-            
-#             topk_non_blank_size = min(beam_size -1, non_blank_log_probs_filtered.size(-1))
-            
-#             if topk_non_blank_size > 0:
-#                 # 상위 K개의 non-blank 토큰 추출
-#                 topk_scores_non_blank, topk_relative_indices = torch.topk(non_blank_log_probs_filtered, topk_non_blank_size, dim=-1)
-#                 topk_tokens_non_blank = non_blank_indices[topk_relative_indices]  # 상위 k개의 후보 token들
-                
-
-#                 for score, token_id_tensor in zip(topk_scores_non_blank.tolist(), topk_tokens_non_blank):
-                    
-#                     new_beams_at_t.append({
-#                         "score": beam["score"] + score,
-#                         # 토큰 시퀀스에 새로운 토큰 추가 (텐서 연산)
-#                         "tokens": torch.cat((beam["tokens"], token_id_tensor.unsqueeze(0))), 
-#                         "states": extracted_states_i, # Predictor 상태 업데이트 (non-blank 트랜지션)
-#                     })
-        
-#         # 모든 새로운 빔 후보들을 스코어 기준으로 정렬하고 beam_size만큼 가지치기
-#         beams = sorted(new_beams_at_t, key=lambda x: x["score"], reverse=True)[:beam_size]
-#         # 조기 종료 조건: 모든 빔이 blank로 끝났거나, 최대 디코딩 길이에 도달했을 때
-#         if all(b["tokens"][-1].item() == blank_id for b in beams) or t == max_decode_steps - 1:
-#             break
-
-#     # 최종 빔들 중에서 가장 높은 스코어를 가진 빔을 선택
-#     best_beam = max(beams, key=lambda x: x["score"])
-#     # 최종 결과 시퀀스에서 blank_id 제거
-#     final_tokens = [token.item() for token in best_beam["tokens"] if token.item() != blank_id]
-
-#     return final_tokens
 
 def rnnt_beam_search(ylens, predictor, joiner, encoder_out: torch.Tensor, beam_size, blank_id, device, lm=None, lm_weight=0.0) -> List[int]:
     # Initialize beam candidates

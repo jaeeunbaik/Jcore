@@ -46,7 +46,7 @@ class Predictor(torch.nn.Module):
         elif self.layer_type == 'gru':
             self.rnn = nn.GRU(
                 input_size=self.embed_dim,
-                hidden_size=2*self.embed_dim,
+                hidden_size=self.hidden_dim,
                 num_layers=n_layers,
                 batch_first=True,
                 dropout=rnn_dropout_rate

@@ -156,63 +156,100 @@ class ModelModule(pl.LightningModule):
                 logging.warning("preprocess_text function not found. Using raw transcriptions for WER.")
                 processed_predicted_transcriptions = predicted_transcriptions
                 processed_reference_transcriptions = reference_transcriptions
-
+                
+                
             batch_wers = []
+            batch_cers = []
+            
             try:
-                import jiwer # jiwer 임포트 확인
+                import jiwer 
                 for gt, pred in zip(processed_reference_transcriptions, processed_predicted_transcriptions):
                     if gt or pred: 
                         wer = jiwer.wer(gt, pred)
                         batch_wers.append(wer)
+                        
+                        cer = jiwer.cer(gt, pred) 
+                        batch_cers.append(cer) 
                     else:
-                        logging.debug(f"Skipping WER for empty GT/PR. GT='{gt}', PR='{pred}'")
+                        logging.debug(f"Skipping WER/CER for empty GT/PR. GT='{gt}', PR='{pred}'") # 로그 메시지 수정
             except ImportError:
-                logging.error("jiwer library not installed. Cannot calculate WER. Please install it with 'pip install jiwer'.")
+                logging.error("jiwer library not installed. Cannot calculate WER/CER. Please install it with 'pip install jiwer'.") # 로그 메시지 수정
                 batch_wers = []
+                batch_cers = [] 
 
-            if batch_wers:
-                avg_wer = sum(batch_wers) / len(batch_wers)
-                self.log("val_wer", avg_wer, prog_bar=True, sync_dist=True)
-            else:
-                self.log("val_wer", 1.0, prog_bar=True, sync_dist=True) 
+            if self.model_config.report_wer: 
+                if batch_wers:
+                    avg_wer = sum(batch_wers) / len(batch_wers)
+                    self.log("val_wer", avg_wer, prog_bar=True, sync_dist=True)
+                    if self.trainer.is_global_zero: 
+                        self.val_wer_samples.extend(batch_wers)
+                        self.val_wer_sum += sum(batch_wers) 
+                        self.val_wer_count += len(batch_wers)
+                else:
+                    self.log("val_wer", 1.0, prog_bar=True, sync_dist=True) 
+            
+            if self.model_config.report_cer:
+                if batch_cers:
+                    avg_cer = sum(batch_cers) / len(batch_cers)
+                    self.log("val_cer", avg_cer, prog_bar=True, sync_dist=True)
+                    if self.trainer.is_global_zero:
+                        self.val_cer_samples.extend(batch_cers)
+                        self.val_cer_sum += sum(batch_cers)
+                        self.val_cer_count += len(batch_cers) 
+                else:
+                    self.log("val_cer", 1.0, prog_bar=True, sync_dist=True) 
 
             if batch_idx == 0 and len(processed_reference_transcriptions) > 0:
                 logging.info(f"\n===== Batch {batch_idx}, Sample 0 (Decoder Type: {self.model.decoder_type}) =====")
                 logging.info(f"GT: '{processed_reference_transcriptions[0]}'")
                 logging.info(f"PR: '{processed_predicted_transcriptions[0]}'")
-                if batch_wers:
+                if batch_wers: 
                     logging.info(f"WER: {batch_wers[0]:.4f} ({batch_wers[0] * 100:.2f}%)")
+                    if batch_cers and self.model_config.report_cer:
+                        logging.info(f"CER: {batch_cers[0]:.4f} ({batch_cers[0] * 100:.2f}%)") 
                 else:
-                    logging.info("WER calculation skipped (no valid texts or jiwer not installed).")
-
-                    
+                    logging.info("WER/CER calculation skipped (no valid texts or jiwer not installed).") 
                 
                 
     def on_validation_epoch_start(self):
-        """에폭 시작 시 WER 통계 초기화"""
         self.val_wer_samples = []
         self.val_wer_sum = 0
         self.val_wer_count = 0
 
     def on_validation_epoch_end(self):
-        """에폭 종료 시 WER 통계 처리 및 로깅"""
         if self.val_wer_count > 0:
-            avg_wer = self.val_wer_sum / self.val_wer_count
-            self.log("val_wer", avg_wer)
+            avg_wer_epoch = self.val_wer_sum / self.val_wer_count
+            self.log("val_wer", avg_wer_epoch, sync_dist=True)
             
-            # 히스토그램 로깅
             if self.logger and hasattr(self.logger, "experiment"):
-                import numpy as np
-                import wandb
                 if self.val_wer_samples:
                     self.logger.experiment.log({
                         "val_wer_histogram": wandb.Histogram(np.array(self.val_wer_samples)),
                         "global_step": self.global_step
                     })
+        else:
+            self.log("val_wer_epoch", 1.0, sync_dist=True)
             
+        if self.val_cer_count > 0:
+            avg_cer_epoch = self.val_cer_sum / self.val_cer_count 
+            self.log("val_cer_epoch", avg_cer_epoch, sync_dist=True)
+            
+            if self.logger and hasattr(self.logger, "experiment"):
+                if self.val_cer_samples:
+                    self.logger.experiment.log({
+                        "val_cer_histogram": wandb.Histogram(np.array(self.val_cer_samples)), 
+                        "global_step": self.global_step
+                    })
+        else:
+            self.log("val_cer_epoch", 1.0, sync_dist=True)
+            
+        if self.trainer.is_global_zero: 
             print(f"\n===== 검증 완료 =====")
-            print(f"검증 샘플 수: {self.val_wer_count}")
-            print(f"평균 WER: {avg_wer:.4f} ({avg_wer*100:.2f}%)")    
+            if self.val_wer_count > 0:
+                print(f"검증 샘플 수: {self.val_wer_count}")
+                print(f"평균 WER (epoch-end): {avg_wer_epoch:.4f} ({avg_wer_epoch*100:.2f}%)")
+            if self.val_cer_count > 0 and self.model_config.report_cer: 
+                print(f"평균 CER (epoch-end): {avg_cer_epoch:.4f} ({avg_cer_epoch*100:.2f}%)")
                 
                 
     def test_step(self, batch, batch_idx):
@@ -225,9 +262,6 @@ class ModelModule(pl.LightningModule):
 
         ref_trans: List[str] = []
         for single_y_tokens in y:
-            # ignore_id (padding)를 제외하고 실제 토큰만 사용
-            # self.model.sos, self.model.eos 도 고려하여 제거해야 할 수 있습니다.
-            # 이 부분은 토크나이저 및 데이터셋 구성에 따라 달라질 수 있습니다.
             filtered_tokens = [
                 token.item() for token in single_y_tokens 
                 if token.item() != self.model.ignore_id and 
@@ -239,11 +273,9 @@ class ModelModule(pl.LightningModule):
         cer_batch = self.error_calculator.calculate_cer(decoded_trans, ref_trans)
         wer_batch = self.error_calculator.calculate_wer(decoded_trans, ref_trans)
         
-        # 평균 CER/WER 로깅 (배치 단위)
         self.log("test_cer", cer_batch, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         self.log("test_wer", wer_batch, on_step=True, on_epoch=True, prog_bar=True, logger=True)
 
-        # 필요하다면 추가적인 로깅 또는 결과 반환
         return {
             "decoded_transcriptions": decoded_trans,
             "reference_transcriptions": ref_trans,
@@ -251,67 +283,41 @@ class ModelModule(pl.LightningModule):
             "wer_batch": wer_batch
         }
         
-            
     def configure_optimizers(self):
-        # optimizer
-        # Conformer 논문은 Adam을 사용했으므로, Adam에 베타와 엡실론 값을 명시적으로 넣어주는 것이 좋습니다.
-        # LambdaLR 스케줄러 사용 시, 옵티마이저의 초기 lr은 1.0으로 설정하는 것이 일반적입니다.
-        initial_lr_for_scheduler = 1.0 
+        initial_lr_for_optimizer = 1.0 
 
         if self.optim_config.type == "AdamW":
-            optimizer = torch.optim.AdamW(self.parameters(), lr=initial_lr_for_scheduler, betas=(0.9, 0.98), eps=1e-9, weight_decay=1e-6)
+            optimizer = torch.optim.AdamW(self.parameters(), lr=initial_lr_for_optimizer, betas=(0.9, 0.98), eps=1e-9, weight_decay=1e-6)
         elif self.optim_config.type == "Adam":
-            optimizer = torch.optim.Adam(self.parameters(), lr=initial_lr_for_scheduler, betas=(0.9, 0.98), eps=1e-9)
+            optimizer = torch.optim.Adam(self.parameters(), lr=initial_lr_for_optimizer, betas=(0.9, 0.98), eps=1e-9)
             
-        # scheduler
-        def transformer_lr_schedule(step, d_model, warmup_steps):
+        def transformer_lr_schedule_factor(step, d_model, warmup_steps, initial_k_value):
             """
-            Transformer Learning Rate Schedule.
-            논문: peak learning rate 0.05 / sqrt(d)
+            Conformer 논문의 Learning Rate Schedule에 따라 '스케일 팩터'를 반환합니다.
+            최종 LR = optimizer_initial_lr * transformer_lr_schedule_factor(...)
+            Args:
+                initial_k_value (float): 논문에서의 'k' 또는 'peak_lr'에 해당하는 값. (YAML의 op_lr)
             """
             if step == 0:
-                step = 1  # 0으로 나누는 것을 방지
+                step = 1  
             
-            # Conformer 논문에 명시된 최고 학습률 (0.05 / sqrt(d))을 정확히 반영
-            # '0.05' 상수를 곱해줘야 합니다.
-            # d_model ** -0.5 == 1 / sqrt(d_model)
-            peak_lr_scale_factor = 0.05 * (d_model ** -0.5) 
-            
-            # 최종 학습률 반환
-            return peak_lr_scale_factor * min(step ** -0.5, step * (warmup_steps ** -1.5))
+            return initial_k_value * (d_model ** -0.5) * min(step ** -0.5, step * (warmup_steps ** -1.5))
 
         d_model = self.model_config.encoder.encoder_dim
         warmup_steps = self.optim_config.warmup_steps
+        k_value_from_config = self.optim_config.op_lr 
         
         def lr_lambda(step):
-            # LambdaLR은 optimizer의 lr에 이 함수의 반환값을 곱하므로,
-            # transformer_lr_schedule 자체가 절대 학습률을 반환하도록 했습니다.
-            # 따라서 optimizer의 lr을 1.0으로 설정해야 이 스케줄이 제대로 작동합니다.
-            return transformer_lr_schedule(step, d_model, warmup_steps)
+            return transformer_lr_schedule_factor(step, d_model, warmup_steps, k_value_from_config)
 
-        if self.optim_config.scheduling_type == "cosine-annealing":
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.trainer_config.num_epochs)
-        elif self.optim_config.scheduling_type == "warmup":
-            # 이 "warmup" 타입은 StepLR을 사용하는데, 이는 트랜스포머의 웜업 스케줄과 다릅니다.
-            # Conformer 논문의 스케줄을 사용하려면 'lambda' 타입을 선택해야 합니다.
-            logging.warning("Using 'warmup' scheduling_type with StepLR. This is NOT the Transformer LR schedule described in the Conformer paper. Consider using 'lambda' type.")
-            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.05)
-        elif self.optim_config.scheduling_type == "lambda":
-            # Conformer 논문 스케줄 적용
+        if self.optim_config.scheduling_type == "lambda":
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
             
-        self.scaler = torch.cuda.amp.GradScaler(
-            init_scale=2**10,
-            growth_factor=2.0,
-            backoff_factor=0.5,
-            growth_interval=2000
-        )
-        
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "step" # 'step' 단위로 스케줄러를 업데이트하도록 명시
+                "interval": "step"
             }
-        } 
+        }
     
