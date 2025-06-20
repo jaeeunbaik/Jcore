@@ -33,16 +33,15 @@ class PredictorTrainer:
         
         # 로깅 설정
         logger = WandbLogger(
-            project=config.trainer.proj + "_Predictor_Finetune", # 프로젝트 이름 변경
-            name=config.trainer.exp_name + "_Predictor_Finetune" # 실험 이름 변경
+            project=config.trainer.proj + "_Predictor_Finetune", 
+            name=config.trainer.exp_name + "_Predictor_Finetune" 
         )
         
-        # 콜백 설정
         callbacks = self._setup_callbacks()
-        strategy = DDPStrategy(find_unused_parameters=False) # DDP 전략 사용
+        strategy = DDPStrategy(find_unused_parameters=False) 
         
         trainer_kwargs = {
-            'max_epochs': config.trainer.num_epochs, # 에폭 수는 기존 ASR보다 적게 설정 (파인튜닝)
+            'max_epochs': config.trainer.num_epochs, 
             'accelerator': 'gpu' if config.trainer.gpus > 0 else 'cpu',
             'devices': config.trainer.gpus if config.trainer.gpus > 0 else None,
             'logger': logger,
@@ -60,15 +59,14 @@ class PredictorTrainer:
 
     def _setup_callbacks(self):
         callbacks = []
-        # 체크포인트 저장 경로 (LM 파인튜닝용 별도 경로)
         checkpoint_dir = os.path.join(os.path.dirname(self.config.checkpoint.model_save_path), "predictor_finetune")
-        os.makedirs(checkpoint_dir, exist_ok=True) # 디렉토리 생성
+        os.makedirs(checkpoint_dir, exist_ok=True) 
 
         callbacks.append(
             ModelCheckpoint(
                 dirpath=checkpoint_dir,
-                filename='{epoch:02d}-{val_lm_loss:.4f}', # LM loss를 기준으로 저장
-                monitor='val_lm_loss', # val_lm_loss가 가장 낮을 때 저장
+                filename='{epoch:02d}-{val_lm_loss:.4f}',
+                monitor='val_lm_loss',
                 save_top_k=self.config.checkpoint.save_top_k,
                 mode='min',
                 save_last=True
@@ -78,16 +76,14 @@ class PredictorTrainer:
         return callbacks
 
     def finetune(self):
-        logging.info(f"Starting Predictor finetuning for {self.config.trainer.num_epochs} epochs")
+        logging.info(f"Starting Predictor finetuning for {self.config.trainer.max_epochs} epochs")
         # resume_from_checkpoint는 파인튜닝 자체를 이어갈 때 사용
         self.trainer.fit(self.model, self.datamodule, ckpt_path=self.config.trainer.get('resume_finetune_ckpt_path', None))
         
-        # 파인튜닝된 모델 저장 경로 (최고 성능 모델)
         best_model_path = self.trainer.checkpoint_callback.best_model_path
         if best_model_path:
             logging.info(f"Best finetuned predictor model saved at: {best_model_path}")
-            # 파인튜닝된 모델 경로를 별도 파일에 저장
-            finetune_model_path_file = os.path.join(os.path.dirname(self.config.checkpoint.model_save_path), 'best_finetuned_predictor_path.txt')
+            finetune_model_path_file = os.path.join(os.path.dirname(self.config.trainer.model_save_path), 'best_finetuned_predictor_path.txt')
             with open(finetune_model_path_file, 'w') as f:
                 f.write(best_model_path)
 

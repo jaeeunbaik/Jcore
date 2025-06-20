@@ -100,7 +100,7 @@ trainer:
   warmup_epochs: 10
   precision: 16
   accumulate_grad_batches: 32
-  gpus: 5
+  gpus: 1
   gradient_clip_val: 1.0
   resume_from_checkpoint: false
   log_every_n_steps: 100
