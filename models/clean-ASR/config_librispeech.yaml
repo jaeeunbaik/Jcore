@@ -1,6 +1,6 @@
 dataloader:
-  batch_size: 4
-  num_workers: 50
+  batch_size: 2
+  num_workers: 8
   pin_memory: True
 data:
   scp_dir: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/librispeech/
@@ -30,6 +30,10 @@ data:
     speed_perturb: false
     speed_factors: [0.9, 1.0, 1.1]  # 0.9가 33%로 적용, 1.0이 33%로 적용, 1.1이 33%로 적용
     speed_prob: 0.5
+
+    gaussian_noise: true
+    gnoise_prob: 0.5
+    gnoise_std: 0.1
   tokenizer: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/util/spm/unigram/unigram2000.model
 model:
   asr:
@@ -37,7 +41,7 @@ model:
       type: "Conformer"
       input_dim: 80
       input_dropout_p: 0.1
-      num_blocks: 16
+      num_blocks: 17
       encoder_dim: 256
       pos_embed_type: "relpos"  # relpos, abspos
       dropout_rate: 0.1
