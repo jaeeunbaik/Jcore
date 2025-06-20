@@ -1,6 +1,6 @@
 dataloader:
   batch_size: 4
-  num_workers: 40
+  num_workers: 50
   pin_memory: True
 data:
   scp_dir: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/librispeech/
@@ -22,8 +22,8 @@ data:
     RT_list: [0.3, 0.5, 0.7]
 
     specaugment: true
-    time_mask_param: 70
-    freq_mask_param: 15
+    time_mask_param: 100
+    freq_mask_param: 27
     n_time_masks: 2
     n_freq_masks: 2
   
@@ -66,7 +66,7 @@ model:
       eprojs: 256      
       odim: 2000
       # rnnt
-      dtype: lstm  # lstm, gru
+      dtype: gru  # lstm, gru
       dlayers: 1
       dunits: 640
       reduce: True
@@ -77,7 +77,7 @@ model:
     sym_space: " "
     sym_blank: "<blank>"
     report_cer: False
-    report_wer: False
+    report_wer: True
   distillation:
     using_distillation: False
     loss_type: "soft_l1"  # kl_div, soft_l1, mse
@@ -93,7 +93,7 @@ trainer:
   weight_decay: 1e-6
   warmup_epochs: 10
   precision: 16
-  accumulate_grad_batches: 4
+  accumulate_grad_batches: 32
   gpus: 5
   gradient_clip_val: 1.0
   resume_from_checkpoint: true
@@ -108,7 +108,7 @@ checkpoint:
   model_save_path: "models/clean_ASR.pth"
 optimizer:
   type: "AdamW"
-  op_lr: 0.16  # 1e-4
+  op_lr: 5.0  # 1e-4
   max_epochs: 100
-  warmup_steps: 10000
+  warmup_steps: 25000
   scheduling_type: "lambda"  # cosine-annealing, warmup, lambda
