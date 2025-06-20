@@ -1,0 +1,81 @@
+dataloader:
+  batch_size: 16 # Predictor 파인튜닝은 음향 특징이 없어 더 큰 배치 가능
+  num_workers: 80 # CPU 코어 수에 맞게 조정 (LM은 CPU가 병목일 가능성 높음)
+  pin_memory: True
+
+data:
+  scp_dir: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/이비인후과corpus/ # Predictor 파인튜닝용 텍스트 토큰 SCP 파일이 있는 디렉토리
+  tokenizer: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/util/spm/bpe/kor_bpe5000.model
+
+sos_id: 2
+eos_id: 3
+asr:
+  encoder:
+    type: "Conformer"
+    input_dim: 80
+    input_dropout_p: 0.1
+    num_blocks: 17
+    encoder_dim: 256
+    pos_embed_type: "relpos"  # relpos, abspos
+    dropout_rate: 0.1
+    ff_expansion_factor: 4
+    ff_activation_type: "swish"
+    ff_dropout_p: 0.1
+    attention_heads: 4
+    att_dropout_p: 0.1
+    cnn_module_kernel: 31
+    conv_expansion_factor: 2
+    conv_batchnorm: True  # True: Batch normalization in ConvModule, else LayerNorm
+    conv_dropout_p: 0.1
+    half_step_residual: True
+  decoder:
+    decoding_method: "greedy"  # greedy, beamsearch
+    lm_fld: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/lm/librispeech/librispeech-4-gram
+    beam_size: 2  # if ctc only, decoding method is greedy search (= no beam search)
+    penalty: 0.3  # < 0: 너무 짧은 출력 억제, 0.0 ~ 0.2 : 일반적인 ASR, 0.3 이상: 너무 긴 출력 억제
+    minlenratio: 0.1
+    maxlenratio: 1.0 # 디코딩 출력의 최대 길이, len(encoder) * maxlenratio
+    rnnlm: false
+    lm_weight: 0.2
+    type: "rnnt"  # ctc, rnnt, transformer, hybrid
+    ctc_type: "builtin"  # builtin, cudnnctc, gtnctc
+    ctc_weight: 0.0
+    eprojs: 256      
+    odim: 5000
+    # rnnt
+    dtype: gru  # lstm, gru
+    dlayers: 1
+    dunits: 640
+    reduce: True
+    dropout_rate: 0.1
+    loss_function: "CE"  # KL_Div, CE
+    lsm_weight: 0.1
+trainer:
+  proj: "Ksponspeech + AIHub_비대면진료담화" # 기존 프로젝트 이름에 파인튜닝 명시
+  exp_name: "predictor_finetune_domain_adapt"
+  log_dir: "logs_predictor_finetune"
+  num_epochs: 20 # 파인튜닝은 보통 적은 에폭 수 (20-50)
+  weight_decay: 1e-6
+  warmup_epochs: 5 # 파인튜닝은 웜업 스텝을 더 짧게
+  precision: 32 # LM 파인튜닝은 FP32로 하는 경우가 많음. (속도가 덜 중요)
+                # BF16/FP16도 가능하지만, 수치 안정성 확인 필요
+  accumulate_grad_batches: 1 # LM은 보통 배치 크기가 커서 누적 안 함
+  gpus: 1 # LM 파인튜닝은 1개 GPU로도 충분할 수 있음 (선택 사항)
+  gradient_clip_val: 1.0
+  resume_from_checkpoint: false # 파인튜닝을 처음 시작할 때는 false
+  log_every_n_steps: 100
+  val_check_interval: 1.0 # 매 에폭 검증
+  strategy: "ddp_spawn" # 단일 GPU면 필요 없고, 여러 GPU면 ddp 또는 ddp_spawn
+  reload_dataloaders_every_n_epochs: 0
+
+checkpoint:
+  checkpoint_monitor: "val_lm_loss" # LM Loss를 모니터링
+  save_top_k: 1 # 최적 1개만 저장
+  model_save_path: "models_finetune/predictor_finetune.pth" # 파인튜닝 모델 저장 경로
+
+optimizer:
+  type: "AdamW"
+  op_lr: 1e-5 # LM 파인튜닝은 기존 ASR보다 낮은 학습률 (예: 1e-4 ~ 5e-5)
+  max_epochs: 20 # trainer.num_epochs와 일치
+  warmup_steps: 1000 # 웜업 스텝도 더 짧게 (예: 500 ~ 2000)
+  scheduling_type: "cosine-annealing" # 파인튜닝은 더 간단한 스케줄러 (cosine) 선호
