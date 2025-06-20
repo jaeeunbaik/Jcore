@@ -10,6 +10,8 @@ data:
   win_length: 400
   hop_length: 160
   test_clean: True
+  audio_feature_mean: #/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/models/stats/Librispeech960/train_mean.pt # <-- 계산 후 저장된 파일 경로
+  audio_feature_std: #/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/models/stats/Librispeech960/train_std.pt   # <-- 계산 후 저장된 파일 경로
   augmentation:
     noise_mixing: false
     noise_dir: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/augmentation/noise.scp

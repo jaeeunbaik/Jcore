@@ -51,20 +51,14 @@ class Dataset(Dataset):
             n_mels=self.n_mels
         )
         
-        # Augmentation configs
         self.augmentation = self.data_config.augmentation
         self.compute_stats_only = compute_stats_only
-        # Initialize augmentations
-        
-        # Initialize augmentations ONLY if not in compute_stats_only mode
         if not self.compute_stats_only:
             self._init_augmentations()
-        else: # For stats computation, ensure no augmentations are initialized
+        else: 
             self.noise_paths = None
             self.rir_data = None
-            self.speed_perturbation = None # 이 경우 SpeedPerturbation 객체도 초기화하지 않음
-
-        # Feature normalization parameters (precomputed_mean/std는 list로 받아서 tensor로 변환)
+            self.speed_perturbation = None 
         self.mean = None
         self.std = None
         if precomputed_mean is not None and precomputed_std is not None:
@@ -159,12 +153,10 @@ class Dataset(Dataset):
                 print("Warning: No RIR files found in", rir_path)
                 return None
                 
-            # Store all RIRs for random selection during augmentation
             rir_data = []
             for file in rir_list:
                 if os.path.exists(file):
                     RIR, sr = librosa.load(file, sr=self.sample_rate, mono=True)
-                    # Normalize RIR energy
                     RIR = RIR / np.sqrt(np.sum(RIR**2) + 1e-9)
                     rir_data.append(RIR)
                 else:
@@ -177,9 +169,7 @@ class Dataset(Dataset):
             return None
     
     def _apply_gaussian_noise(self, features: torch.Tensor) -> torch.Tensor:
-        """Add Gaussian noise to the features."""
         if self.gaussian_noise_prob > 0 and random.random() < self.gaussian_noise_prob:
-            # 노이즈는 특징의 분포와 유사하도록 생성 (평균 0, 특정 표준편차)
             noise = torch.randn_like(features) * self.gaussian_noise_std
             features = features + noise
         return features
@@ -190,21 +180,16 @@ class Dataset(Dataset):
             noise_path = random.choice(self.noise_paths)
             noise, noise_sr = torchaudio.load(noise_path)
             
-            # Resample noise if needed
             if noise_sr != self.sample_rate:
                 resampler = Resample(orig_freq=noise_sr, new_freq=self.sample_rate)
                 noise = resampler(noise)
             
-            # Adjust noise length to match waveform
             if noise.shape[1] < waveform.shape[1]:
-                # Repeat noise to cover audio length
                 factor = int(np.ceil(waveform.shape[1] / noise.shape[1]))
                 noise = noise.repeat(1, factor)[:, :waveform.shape[1]]
             else:
-                # Trim noise to match audio length
                 noise = noise[:, :waveform.shape[1]]
             
-            # Mix noise with original audio
             noise_level = random.uniform(0, self.noise_level)
             waveform = (1 - noise_level) * waveform + noise_level * noise
         return waveform
@@ -212,52 +197,35 @@ class Dataset(Dataset):
     def _apply_rir_mixing(self, waveform):
         # waveform: [channels, T] tensor (e.g., [1, T])
         if self.rir_data and random.random() < self.rir_prob:
-            rir_np = random.choice(self.rir_data) # numpy array
+            rir_np = random.choice(self.rir_data) 
             rir_tensor = torch.from_numpy(rir_np).to(waveform.dtype) 
 
-            # RIR이 1D여야 함. 필요 시 flatten
             if len(rir_tensor.shape) > 1:
                 rir_tensor = rir_tensor.flatten()
             
-            # --- 여기부터 수정 ---
-            # torchaudio.functional.convolve에 맞춰 rir_tensor 차원 조정
-            # waveform이 [C, T] (2D)이므로, rir_tensor도 [C_kernel, K] (2D) 형태로 만들어야 합니다.
-            # RIR은 일반적으로 모노이므로 C_kernel은 1입니다.
-            rir_tensor = rir_tensor.unsqueeze(0) # [RIR_len] -> [1, RIR_len]
-            # --- 여기까지 수정 ---
+            rir_tensor = rir_tensor.unsqueeze(0) 
+
 
             try:
-                # AF.convolve 호출: waveform ([C, T]), rir_tensor ([C_kernel, K])
-                # C_kernel은 waveform의 C와 같아야 합니다 (여기서는 모두 1).
                 reverberated = torchaudio.functional.convolve(waveform, rir_tensor, mode='full')
                 
-                # 컨볼루션 결과는 원본보다 길어지므로, 원본 waveform 길이로 자르기
-                # 가운데 부분을 취하는 것이 일반적
                 start_idx = (reverberated.shape[-1] - waveform.shape[-1]) // 2
                 reverberated = reverberated[:, start_idx : start_idx + waveform.shape[-1]]
-            except AttributeError: # torchaudio.functional.convolve가 없거나 오류 발생 시
-                # SciPy를 사용한 폴백 (numpy 기반)
-                # waveform과 rir_np를 numpy 배열로 변환하여 컨볼루션 수행
+            except AttributeError: 
                 waveform_np = waveform.numpy()
                 if len(rir_np.shape) > 1:
                     rir_np = rir_np.flatten()
                 
-                # NumPy convolve는 1D 배열에 대해 작동하므로, waveform_np에서 채널 차원을 제거해야 함
-                # 현재 waveform_np는 [1, T] 이므로 waveform_np[0] 사용
                 temp = ss.convolve(waveform_np[0], rir_np, mode='full') 
 
-                # 컨볼루션 결과는 원본보다 길어지므로, 원본 waveform 길이로 자르기
-                # 가운데 부분을 취하는 것이 일반적
                 start_idx_np = (temp.shape[-1] - waveform_np.shape[-1]) // 2
                 temp = temp[start_idx_np : start_idx_np + waveform_np.shape[-1]]
 
-                # 결과가 너무 작거나 클 경우 정규화
-                if np.max(np.abs(temp)) > 1e-6: # 0으로 나누는 것 방지
+                if np.max(np.abs(temp)) > 1e-6:
                     temp = temp / np.max(np.abs(temp)) * np.max(np.abs(waveform_np))
                 
-                reverberated = torch.from_numpy(np.expand_dims(temp, axis=0)).to(waveform.dtype) # 다시 [1, T] 형태로
+                reverberated = torch.from_numpy(np.expand_dims(temp, axis=0)).to(waveform.dtype) 
 
-            # 증강된 waveform의 크기가 너무 커지면 원본 waveform과 비슷한 스케일로 정규화
             if reverberated.abs().max() > 1e-6: 
                 reverberated = reverberated / reverberated.abs().max() * waveform.abs().max()
 
