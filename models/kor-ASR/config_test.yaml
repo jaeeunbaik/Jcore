@@ -1,6 +1,6 @@
 dataloader:
   batch_size: 2
-  num_workers: 100
+  num_workers: 4
   pin_memory: True
 data:
   scp_dir: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/순천향대test/
@@ -93,7 +93,7 @@ model:
 
 trainer:
   proj: "Test"
-  exp_name: "kspon345+AIHub비대면PAHA-epoch13"
+  exp_name: "kspon345+AIHub비대면PAHA-epoch14"
   log_dir: "logs"
   num_epochs: 100
   weight_decay: 1e-6

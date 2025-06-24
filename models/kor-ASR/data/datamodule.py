@@ -167,6 +167,11 @@ class ASRDataModule(pl.LightningDataModule):
         Returns:
             tuple: (padded_features, feature_lengths, padded_targets)
         """
+        batch = [item for item in batch if item is not None]
+
+        if not batch:
+            return None  # or raise an exception
+        
         batch.sort(key=lambda x: x[1], reverse=True)
         
         features, feature_lengths, targets, target_lengths, wav_path = zip(*batch)

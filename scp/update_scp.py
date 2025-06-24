@@ -1,6 +1,21 @@
 import os
 import sentencepiece as spm
 from typing import Dict, List, Tuple
+import num2words
+import re
+
+
+def number_to_korean(text):
+    """
+    문자열 내의 모든 숫자를 한국어 발음으로 변환합니다.
+    """
+    def replace_number(match):
+        num = int(match.group(0))
+        return num2words.num2words(num, to='cardinal', lang='ko')
+
+    return re.sub(r'\d+', replace_number, text)
+
+
 
 def update_path(input_file_path: str, output_file_path: str, new_base_path: str):
     """
@@ -93,6 +108,51 @@ def txt_to_token(input_file_path: str, output_file_path: str, spm_model_path: st
         
         
         
+def convert_num2word(input_file_path: str, output_file_path: str):
+    """
+    train.scp 파일의 각 줄에서 한글 스크립트를 숫자를 한국어 발음으로 변환하여 저장합니다.
+    오디오 경로는 그대로 유지합니다.
+
+    Args:
+        input_file_path (str): 원본 train.scp 파일의 전체 경로.
+        output_file_path (str): 숫자가 변환된 결과를 저장할 파일의 전체 경로.
+    """
+    try:
+        with open(input_file_path, 'r', encoding='utf-8') as f_in, \
+             open(output_file_path, 'w', encoding='utf-8') as f_out:
+             
+            for line_num, line in enumerate(f_in, start=1):
+                if '|' in line: # 음원 - 텍스트 pair scp 파일일 때
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split('|')
+                    if len(parts) < 2:
+                        print(f"경고: 라인 {line_num} - 유효하지 않은 형식: {line}.")
+                        continue
+                        
+                    original_audio_path = parts[0]
+                    korean_script = '|'.join(parts[1:])
+                    
+                    # 숫자 -> 한글 발음 변환 적용
+                    korean_script = number_to_korean(korean_script)
+                    
+                    f_out.write(f"{original_audio_path}|{korean_script}\n")
+                else: # 텍스트만 존재하는 scp 파일일 때
+                    line = line.strip()
+                    # 숫자 -> 한글 발음 변환 적용
+                    line = number_to_korean(line)
+                    
+                    f_out.write(f"{line}\n")
+                    
+        print(f"문자열을 숫자를 한글로 변환 완료. '{output_file_path}' 파일 작성 완료.")
+    except FileNotFoundError as e:
+        print(f"오류: 파일을 찾을 수 없습니다 - {e}")
+    except Exception as e:
+        print(f"오류 발생: {e}")
+
+        
+        
 def truncate(input_file_path: str, output_file_path: str):
     """
     train.scp 파일에서 각 줄의 오디오 파일 경로 상의 폴더명이 PA, HA, HB로 시작하는 라인만 필터링하여,
@@ -140,12 +200,12 @@ def truncate(input_file_path: str, output_file_path: str):
 # --- 사용 예시 ---
 if __name__ == "__main__":
     # 1. 원본 train.scp 파일의 경로를 여기에 입력하세요.
-    original_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/AIHub_비대면진료/train.scp'
+    original_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/순천향대test/testclean.scp'
     
     # 2. 새로 생성될 train.scp 파일의 경로를 여기에 입력하세요.
     # 이 경로는 원본 파일과 달라야 합니다. (혹은 원본을 덮어쓰고 싶다면 동일하게 설정)
     # 안전하게 처리하기 위해서는 항상 새로운 파일로 저장하는 것을 권장합니다.
-    update_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/순천향대test/testclean.scp' 
+    update_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/순천향대test/testclean_new.scp' 
     output_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/순천향대test/testclean_token.scp'
     out_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/ksponspeech/dev_trunc.scp'
     # 3. 새로운 데이터셋 기본 경로를 여기에 입력하세요.
@@ -156,8 +216,8 @@ if __name__ == "__main__":
 
 
     print(f"'{original_scp_file}' 파일을 처리하여 토큰화된 '{output_scp_file}'을 생성합니다...")
-    # process_scp_file_safely(original_scp_file, output_scp_file, new_base_directory, spm_model_file)
     # update_path(original_scp_file, update_scp_file, new_base_directory)
+    convert_num2word(original_scp_file, update_scp_file)
     txt_to_token(update_scp_file, output_scp_file, spm_model_file)
     # truncate(output_scp_file, out_scp_file)
     # --- 업데이트된 파일 내용 확인 (선택 사항) ---

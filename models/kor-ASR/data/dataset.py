@@ -262,51 +262,50 @@ class Dataset(Dataset):
     def __getitem__(self, idx):
         item = self.items[idx]
         # Load audio
-        waveform, sample_rate = torchaudio.load(item['audio_path'])
-        
-        # Resample if needed
-        if sample_rate != self.sample_rate:
-            resampler = Resample(orig_freq=sample_rate, new_freq=self.sample_rate)
-            waveform = resampler(waveform)
-        
-        # Apply audio-level augmentations
-        if not self.compute_stats_only:
-            if self.augmentation.get('speed_perturb', False):
-                (waveform, _) = self._apply_speed_perturbation(waveform)
-                
-            if self.augmentation.get('noise_mixing', False):
-                waveform = self._apply_noise_mixing(waveform)
+        audio_path = item['audio_path']  # 오디오 파일 경로 저장
 
-            if self.augmentation.get('rir_mixing', False):
-                waveform = self._apply_rir_mixing(waveform)
-            
-        features = self.feature_extractor(waveform)
-        feat_len = features.shape[2]        
-        # Convert to log mel spectrogram
-        features = torch.log(features + 1e-6)
-        
-        # if not self.compute_stats_only:  # 가우시안 노이즈 믹싱 증강 하는 코드
-        #     if self.augmentation.get('gaussian_noise', False):
-        #         features = self._apply_gaussian_noise(features)
-        # if self.subset in ['train', 'dev']:  # test 시에 데이터 정규화 X
-        #     mean_expanded = self.mean.unsqueeze(0).unsqueeze(2) # (80,) -> (1, 80, 1)
-        #     std_expanded = self.std.unsqueeze(0).unsqueeze(2)   # (80,) -> (1, 80, 1)
-            
-        #     if self.mean is not None and self.std is not None:
-        #         features = (features - mean_expanded) / (std_expanded + 1e-5)
-        # Process target text  # scp 파일이 경로|txt 일 때
-        # target = self.token_processor(item['text'])
-        # target_len = len(target)
-        
-        # 정규화 전처리
-        mean_expanded = self.mean.unsqueeze(0).unsqueeze(2) # (80,) -> (1, 80, 1)
-        std_expanded = self.std.unsqueeze(0).unsqueeze(2)   # (80,) -> (1, 80, 1)
-            
-        if self.mean is not None and self.std is not None:
-            features = (features - mean_expanded) / (std_expanded + 1e-5)
-        
-        target = item['token']
-        target_len = len(target)
-        
-        return features.squeeze(0).transpose(0, 1), feat_len, target, target_len, item['audio_path']
+        try:
+            # Load audio
+            waveform, sample_rate = torchaudio.load(audio_path)
 
+            # Resample if needed
+            if sample_rate != self.sample_rate:
+                resampler = Resample(orig_freq=sample_rate, new_freq=self.sample_rate)
+                waveform = resampler(waveform)
+
+            # Apply audio-level augmentations
+            if not self.compute_stats_only:
+                if self.augmentation.get('speed_perturb', False):
+                    (waveform, _) = self._apply_speed_perturbation(waveform)
+
+                if self.augmentation.get('noise_mixing', False):
+                    waveform = self._apply_noise_mixing(waveform)
+
+                if self.augmentation.get('rir_mixing', False):
+                    waveform = self._apply_rir_mixing(waveform)
+
+            features = self.feature_extractor(waveform)
+            feat_len = features.shape[2]
+            # Convert to log mel spectrogram
+            features = torch.log(features + 1e-6)
+
+            # 정규화 전처리
+            mean_expanded = self.mean.unsqueeze(0).unsqueeze(2)  # (80,) -> (1, 80, 1)
+            std_expanded = self.std.unsqueeze(0).unsqueeze(2)  # (80,) -> (1, 80, 1)
+
+            if self.mean is not None and self.std is not None:
+                features = (features - mean_expanded) / (std_expanded + 1e-5)
+
+            target = item['token']
+            target_len = len(target)
+
+            return features.squeeze(0).transpose(0, 1), feat_len, target, target_len, audio_path
+
+        except FileNotFoundError:
+            logging.warning(f"Audio file not found: {audio_path}. Skipping this sample.")
+            # None을 반환하거나, 적절한 대체값을 반환
+            return None  # 또는 다른 기본값
+
+        except Exception as e:
+            logging.error(f"Error loading audio file: {audio_path}. Skipping this sample. Error: {e}")
+            return None  # 또는 다른 기본값
