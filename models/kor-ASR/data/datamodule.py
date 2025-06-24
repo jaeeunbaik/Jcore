@@ -169,7 +169,7 @@ class ASRDataModule(pl.LightningDataModule):
         """
         batch.sort(key=lambda x: x[1], reverse=True)
         
-        features, feature_lengths, targets, target_lengths = zip(*batch)
+        features, feature_lengths, targets, target_lengths, wav_path = zip(*batch)
         
         padded_features = torch.nn.utils.rnn.pad_sequence(
             features,
@@ -186,4 +186,4 @@ class ASRDataModule(pl.LightningDataModule):
         )
         target_lengths = torch.tensor(target_lengths)
 
-        return padded_features, feature_lengths, padded_targets, target_lengths
+        return padded_features, feature_lengths, padded_targets, target_lengths, wav_path

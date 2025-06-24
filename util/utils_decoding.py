@@ -346,17 +346,26 @@ def rnnt_beam_search(ylens, predictor, joiner, encoder_out: torch.Tensor, beam_s
         num_layers_directions = predictor.rnn.num_layers * (2 if predictor.rnn.bidirectional else 1)
         hidden_size = predictor.hidden_dim
 
-        states_to_concat_h = []
-        states_to_concat_c = []
-        for b in beams:
-            if b["predictor_states"] is None:
-                states_to_concat_h.append(torch.zeros(num_layers_directions, 1, hidden_size, device=device))
-                states_to_concat_c.append(torch.zeros(num_layers_directions, 1, hidden_size, device=device))
-            else:
-                states_to_concat_h.append(b["predictor_states"][0])
-                states_to_concat_c.append(b["predictor_states"][1])
-        predictor_input_states = (torch.cat(states_to_concat_h, dim=1), torch.cat(states_to_concat_c, dim=1))
-
+        if isinstance(predictor.rnn, torch.nn.LSTM):
+            states_to_concat_h = []
+            states_to_concat_c = []
+            for b in beams:
+                if b["predictor_states"] is None:
+                    states_to_concat_h.append(torch.zeros(num_layers_directions, 1, hidden_size, device=device))
+                    states_to_concat_c.append(torch.zeros(num_layers_directions, 1, hidden_size, device=device))
+                else:
+                    states_to_concat_h.append(b["predictor_states"][0])
+                    states_to_concat_c.append(b["predictor_states"][1])
+                predictor_input_states = (torch.cat(states_to_concat_h, dim=1), torch.cat(states_to_concat_c, dim=1))
+        elif isinstance(predictor.rnn, torch.nn.GRU):
+            states_to_concat_h = []
+            for b in beams:
+                if b["predictor_states"] is None:
+                    states_to_concat_h.append(torch.zeros(num_layers_directions, 1, hidden_size, device=device))
+                else:
+                    states_to_concat_h.append(b["predictor_states"])
+                predictor_input_states = torch.cat(states_to_concat_h, dim=1)
+            
         predictor_y_lengths = torch.ones(current_tokens_batch.size(0), dtype=torch.long, device=device)
         pred_out_batch, new_predictor_states_batch = predictor(y=current_tokens_batch, y_lengths=predictor_y_lengths, states=predictor_input_states)
 
@@ -380,7 +389,11 @@ def rnnt_beam_search(ylens, predictor, joiner, encoder_out: torch.Tensor, beam_s
             lm_pred_out_batch = torch.log_softmax(lm_pred_out_batch, dim=-1) # LM log probs
 
         for i, beam in enumerate(beams):
-            extracted_predictor_states_i = (new_predictor_states_batch[0][:, i:i+1, :], new_predictor_states_batch[1][:, i:i+1, :])
+            if isinstance(predictor.rnn, torch.nn.LSTM):
+                extracted_predictor_states_i = (new_predictor_states_batch[0][:, i:i+1, :], new_predictor_states_batch[1][:, i:i+1, :])
+            elif isinstance(predictor.rnn, torch.nn.GRU):
+                extracted_predictor_states_i = new_predictor_states_batch[:, i:i+1, :]
+            
             extracted_lm_states_i = None
             if lm is not None:
                 extracted_lm_states_i = (new_lm_states_batch[0][:, i:i+1, :], new_lm_states_batch[1][:, i:i+1, :])
@@ -439,6 +452,8 @@ def rnnt_beam_search(ylens, predictor, joiner, encoder_out: torch.Tensor, beam_s
     final_tokens = [token.item() for token in best_beam["tokens"] if token.item() != blank_id]
 
     return final_tokens
+
+
 
 class CTCPrefixScoreTH(object):
     """Batch processing of CTCPrefixScore

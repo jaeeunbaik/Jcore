@@ -68,7 +68,7 @@ class Trainer:
             ModelCheckpoint(
                 dirpath=checkpoint_path,
                 filename='{epoch:02d}-{val_wer:.4f}',
-                monitor='val_wer',
+                monitor='val_wer_epoch',
                 save_top_k=self.config.checkpoint.save_top_k,
                 mode='min',
                 save_last=True

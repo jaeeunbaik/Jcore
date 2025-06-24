@@ -113,7 +113,7 @@ class ASRDataModule(pl.LightningDataModule):
         logging.info(f"Computed training feature mean (first 5 elements): {[f'{x:.4f}' for x in self.train_mean[:5]]}")
         logging.info(f"Computed training feature std (first 5 elements): {[f'{x:.4f}' for x in self.train_std[:5]]}")
 
-        output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../stats")     
+        output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../stats/Librispeech")     
         os.makedirs(output_dir, exist_ok=True)
         mean_file = os.path.join(output_dir, "train_mean.pt")
         std_file = os.path.join(output_dir, "train_std.pt")

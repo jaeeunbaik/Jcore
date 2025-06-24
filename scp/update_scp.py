@@ -145,8 +145,8 @@ if __name__ == "__main__":
     # 2. 새로 생성될 train.scp 파일의 경로를 여기에 입력하세요.
     # 이 경로는 원본 파일과 달라야 합니다. (혹은 원본을 덮어쓰고 싶다면 동일하게 설정)
     # 안전하게 처리하기 위해서는 항상 새로운 파일로 저장하는 것을 권장합니다.
-    update_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/이비인후과corpus/train.scp' 
-    output_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/이비인후과corpus/train_token.scp'
+    update_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/순천향대test/testclean.scp' 
+    output_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/순천향대test/testclean_token.scp'
     out_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/ksponspeech/dev_trunc.scp'
     # 3. 새로운 데이터셋 기본 경로를 여기에 입력하세요.
     new_base_directory = '/home/hdd1/jenny/AIHub_비대면진료'

@@ -30,7 +30,7 @@ class Dataset(Dataset):
         super().__init__()
         self.data_config = data_config
         # Load data paths
-        self.scp_path = self.data_config.scp_dir + f"{subset}_token.scp"
+        self.scp_path = self.data_config.scp_dir + f"/{subset}_token.scp"
         self.items = self._load_scp(self.scp_path)
         
         self.sample_rate = self.data_config.sample_rate
@@ -40,7 +40,7 @@ class Dataset(Dataset):
         self.hop_length = self.data_config.hop_length
         
         # Token processor
-        self.token_processor = TokenProcessor(self.data_config.tokenizer)
+        self.token_processor = TokenProcessor(self.data_config.tokenizer_path)
         
         # Feature extractor
         self.feature_extractor = MelSpectrogram(
@@ -284,15 +284,15 @@ class Dataset(Dataset):
         # Convert to log mel spectrogram
         features = torch.log(features + 1e-6)
         
+        if self.mean is not None and self.std is not None:
+            mean_expanded = self.mean.unsqueeze(0).unsqueeze(2) # (80,) -> (1, 80, 1)
+            std_expanded = self.std.unsqueeze(0).unsqueeze(2)   # (80,) -> (1, 80, 1)
+            features = (features - mean_expanded) / (std_expanded + 1e-5)
+        
         if not self.compute_stats_only:
             if self.augmentation.get('gaussian_noise', False):
                 features = self._apply_gaussian_noise(features)
         
-        mean_expanded = self.mean.unsqueeze(0).unsqueeze(2) # (80,) -> (1, 80, 1)
-        std_expanded = self.std.unsqueeze(0).unsqueeze(2)   # (80,) -> (1, 80, 1)
-        
-        if self.mean is not None and self.std is not None:
-            features = (features - mean_expanded) / (std_expanded + 1e-5)
         # Process target text
         # target = self.token_processor(item['text'])
         # target_len = len(target)

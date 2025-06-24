@@ -5,8 +5,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torchaudio
-import torchaudio.functional
+from typing import Union
 
 
 class Predictor(torch.nn.Module):
@@ -56,33 +55,44 @@ class Predictor(torch.nn.Module):
     def forward(
         self,
         y: torch.Tensor,
-        y_lengths: Optional[Tuple[torch.Tensor]] = None,
-        states: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        y_lengths: Optional[torch.Tensor] = None,
+        states: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None, 
+    ) -> Tuple[torch.Tensor, Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]:
         """
-            input
-                y:
-                state: a tuple of two tensors containing the states information of LSTM layers in this decoder.
-            return
-            
+        Forward pass for the Predictor network.
         """
         embedded = self.embed(y)
         embedded = self.embed_dropout(embedded)
+
         if y_lengths is not None:
             y_lengths_cpu = y_lengths.to("cpu", dtype=torch.int64)
-            embedded = nn.utils.rnn.pack_padded_sequence(
-                embedded.transpose(0, 1), y_lengths_cpu, enforce_sorted=False
+            
+            packed_embedded = nn.utils.rnn.pack_padded_sequence(
+                embedded, y_lengths_cpu, batch_first=True, enforce_sorted=False
             )
-            outputs, states = self.rnn(embedded, states)
-            outputs, _ = nn.utils.rnn.pad_packed_sequence(outputs)
-            outputs = self.output_linear(outputs.transpose(0, 1))
-        else:
-            outputs, states = self.rnn(embedded, states)
-            outputs = self.output_linear(outputs)
+            
+            if self.layer_type == 'lstm':
+                outputs, new_states = self.rnn(packed_embedded, states) # (h, c)
+            elif self.layer_type == 'gru':
+                outputs, new_states = self.rnn(packed_embedded, states) # (h, )
+            else:
+                raise ValueError(f"Unsupported layer_type: {self.layer_type}")
 
-        return outputs, states
-    
-    
+            outputs, _ = nn.utils.rnn.pad_packed_sequence(outputs, batch_first=True)
+            outputs = self.output_linear(outputs)
+            
+            return outputs, new_states
+        else: 
+            if self.layer_type == 'lstm':
+                outputs, new_states = self.rnn(embedded, states) 
+            elif self.layer_type == 'gru':
+                outputs, new_states = self.rnn(embedded, states)
+            else:
+                raise ValueError(f"Unsupported layer_type: {self.layer_type}")
+            
+            outputs = self.output_linear(outputs)
+            
+            return outputs, new_states
     
 class Joiner(torch.nn.Module):
     '''

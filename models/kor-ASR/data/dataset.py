@@ -29,6 +29,7 @@ class Dataset(Dataset):
         """
         super().__init__()
         self.data_config = data_config
+        self.subset = subset
         # Load data paths
         self.scp_path = self.data_config.scp_dir + f"{subset}_token.scp"
         self.items = self._load_scp(self.scp_path)
@@ -101,9 +102,9 @@ class Dataset(Dataset):
             self.speed_prob = self.augmentation.speed_prob
             self.speed_perturbation = SpeedPerturbation(self.sample_rate, self.speed_factors)
     
-        if self.augmentation.gaussian_noise:
-            self.gaussian_noise_prob = self.augmentation.gnoise_prob
-            self.gaussian_noise_std = self.augmentation.gnoise_std
+        # if self.augmentation.gaussian_noise:
+        #     self.gaussian_noise_prob = self.augmentation.gnoise_prob
+        #     self.gaussian_noise_std = self.augmentation.gnoise_std
         
     def _load_scp(self, scp_path):
         """Load dataset manifest file"""
@@ -168,11 +169,11 @@ class Dataset(Dataset):
             print(f"Error loading RIR data: {e}")
             return None
     
-    def _apply_gaussian_noise(self, features: torch.Tensor) -> torch.Tensor:
-        if self.gaussian_noise_prob > 0 and random.random() < self.gaussian_noise_prob:
-            noise = torch.randn_like(features) * self.gaussian_noise_std
-            features = features + noise
-        return features
+    # def _apply_gaussian_noise(self, features: torch.Tensor) -> torch.Tensor:
+    #     if self.gaussian_noise_prob > 0 and random.random() < self.gaussian_noise_prob:
+    #         noise = torch.randn_like(features) * self.gaussian_noise_std
+    #         features = features + noise
+    #     return features
     
     def _apply_noise_mixing(self, waveform):
         """Add background noise to the audio"""
@@ -284,21 +285,28 @@ class Dataset(Dataset):
         # Convert to log mel spectrogram
         features = torch.log(features + 1e-6)
         
-        if not self.compute_stats_only:
-            if self.augmentation.get('gaussian_noise', False):
-                features = self._apply_gaussian_noise(features)
-        
-        mean_expanded = self.mean.unsqueeze(0).unsqueeze(2) # (80,) -> (1, 80, 1)
-        std_expanded = self.std.unsqueeze(0).unsqueeze(2)   # (80,) -> (1, 80, 1)
-        
-        if self.mean is not None and self.std is not None:
-            features = (features - mean_expanded) / (std_expanded + 1e-5)
-        # Process target text
+        # if not self.compute_stats_only:  # 가우시안 노이즈 믹싱 증강 하는 코드
+        #     if self.augmentation.get('gaussian_noise', False):
+        #         features = self._apply_gaussian_noise(features)
+        # if self.subset in ['train', 'dev']:  # test 시에 데이터 정규화 X
+        #     mean_expanded = self.mean.unsqueeze(0).unsqueeze(2) # (80,) -> (1, 80, 1)
+        #     std_expanded = self.std.unsqueeze(0).unsqueeze(2)   # (80,) -> (1, 80, 1)
+            
+        #     if self.mean is not None and self.std is not None:
+        #         features = (features - mean_expanded) / (std_expanded + 1e-5)
+        # Process target text  # scp 파일이 경로|txt 일 때
         # target = self.token_processor(item['text'])
         # target_len = len(target)
+        
+        # 정규화 전처리
+        mean_expanded = self.mean.unsqueeze(0).unsqueeze(2) # (80,) -> (1, 80, 1)
+        std_expanded = self.std.unsqueeze(0).unsqueeze(2)   # (80,) -> (1, 80, 1)
+            
+        if self.mean is not None and self.std is not None:
+            features = (features - mean_expanded) / (std_expanded + 1e-5)
         
         target = item['token']
         target_len = len(target)
         
-        return features.squeeze(0).transpose(0, 1), feat_len, target, target_len
+        return features.squeeze(0).transpose(0, 1), feat_len, target, target_len, item['audio_path']
 

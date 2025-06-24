@@ -90,16 +90,6 @@ class e2eASR(nn.Module):
             self.ctc = CTC(self.decoder_config)
             self.ctc_weight = 0.0
 
-        if model_config.report_cer or model_config.report_wer:
-            self.error_calculator = ErrorCalculator(
-                model_config.char_list,
-                model_config.sym_space,
-                model_config.sym_blank,
-                model_config.report_cer,
-                model_config.report_wer,
-            )
-        else:
-            self.error_calculator = None
         self.rnnlm = None
         self._init_parameters()
 
@@ -261,9 +251,8 @@ class e2eASR(nn.Module):
         else:
             batch_size = xs_pad.size(0)
             loss_ctc = self.ctc(hs_pad.view(batch_size, -1, self.encoder_config.encoder_dim), hs_lengths, ys_pad)
-            if not self.training and self.error_calculator is not None:
+            if not self.training:
                 ys_hat = self.ctc.argmax(self.hs_pad.view(batch_size, -1, self.encoder_config.encoder_dim)).data
-                cer_ctc = self.error_calculator(ys_hat.cpu(), ys_pad.cpu(), is_ctc=True)
             # for visualization
             if not self.training:
                 self.ctc.softmax(hs_pad)
@@ -271,11 +260,10 @@ class e2eASR(nn.Module):
             
             
         # 5. compute cer/wer
-        if self.training or self.error_calculator is None or self.decoder is None:
+        if self.training or self.decoder is None:
             cer, wer = None, None
         else:
             ys_hat = pred_pad.argmax(dim=-1)
-            cer, wer = self.error_calculator(ys_hat.cpu(), ys_pad.cpu())
 
         # 6. return loss
         if self.decoder_type == "hybrid":

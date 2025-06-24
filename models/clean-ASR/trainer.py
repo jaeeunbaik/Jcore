@@ -69,7 +69,7 @@ class Trainer:
                 dirpath=checkpoint_path,
                 filename='{epoch:02d}-{val_wer:.4f}',
                 monitor='val_wer',
-                save_top_k=self.config.trainer.save_top_k,
+                save_top_k=self.config.checkpoint.save_top_k,
                 mode='min',
                 save_last=True
             )
@@ -132,19 +132,50 @@ class Trainer:
     @staticmethod
     def load_config(config_path):
         """
-        Load YAML configuration file
+        Load YAML configuration file and resolve relative paths.
         
         Args:
             config_path: Path to the YAML configuration file
             
         Returns:
-            AttrDict: Configuration as an attribute dictionary
+            AttrDict: Configuration as an attribute dictionary with resolved paths.
         """
-        with open(config_path, 'r') as f:
+        config_path_abs = os.path.abspath(config_path)
+        
+        # config.yaml 파일이 있는 디렉토리
+        # 예: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/models/kor-ASR/
+        config_file_dir = os.path.dirname(config_path_abs)
+        
+        # 여기서 두 폴더 상위 디렉토리로 이동
+        # 예: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/
+        base_dir_for_resolution = os.path.dirname(config_file_dir)# <-- 이 줄을 변경
+        
+        with open(config_path_abs, 'r') as f:
             config = yaml.safe_load(f)
         
+        def resolve_paths(data, current_base_dir): # 인자명 변경: base_dir 대신 current_base_dir
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    if isinstance(value, str) and (
+                        key.endswith('_dir') or 
+                        key.endswith('_path') or 
+                        key.endswith('_file') or
+                        key == 'tokenizer' # tokenizer 키도 상대경로일 수 있으므로 추가
+                    ) and value.startswith('..'):
+                        # 현재 base_dir_for_resolution을 기준으로 상대 경로를 해석
+                        data[key] = os.path.abspath(os.path.join(current_base_dir, value))
+                    else:
+                        data[key] = resolve_paths(value, current_base_dir) # 재귀 호출 시에도 변경된 base_dir 전달
+            elif isinstance(data, list):
+                data = [resolve_paths(item, current_base_dir) for item in data]
+            return data
+
+        # config 딕셔너리 전체에 대해 경로 해석 적용
+        config_resolved = resolve_paths(config, base_dir_for_resolution) # 변경된 base_dir 전달
+        
         print(f"Loaded configuration from: {config_path}")
-        return AttrDict(config)
+        print(f"Paths resolved relative to: {base_dir_for_resolution}") # 확인을 위한 로그 추가
+        return AttrDict(config_resolved)
 
 
 def main():
