@@ -181,8 +181,7 @@ class ASRDataModule(pl.LightningDataModule):
 
         padded_targets = torch.nn.utils.rnn.pad_sequence(
             targets,
-            batch_first=True,
-            padding_value=0 
+            batch_first=True
         )
         target_lengths = torch.tensor(target_lengths)
 

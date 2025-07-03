@@ -1,7 +1,8 @@
-# ASR Knowledge Distillation
+# ASR Model
 
 This project implements an Automatic Speech Recognition (ASR) system with PyTorch Lightning.
 This is an ASR TOOLKIT designed for greater simplicity and clarity.
+Transformer Decoder and CTC Decoding need more updates.
 
 ## Project Structure
 

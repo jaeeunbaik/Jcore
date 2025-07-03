@@ -169,11 +169,11 @@ class Dataset(Dataset):
             print(f"Error loading RIR data: {e}")
             return None
     
-    # def _apply_gaussian_noise(self, features: torch.Tensor) -> torch.Tensor:
-    #     if self.gaussian_noise_prob > 0 and random.random() < self.gaussian_noise_prob:
-    #         noise = torch.randn_like(features) * self.gaussian_noise_std
-    #         features = features + noise
-    #     return features
+    def _apply_gaussian_noise(self, features: torch.Tensor) -> torch.Tensor:
+        if self.gaussian_noise_prob > 0 and random.random() < self.gaussian_noise_prob:
+            noise = torch.randn_like(features) * self.gaussian_noise_std
+            features = features + noise
+        return features
     
     def _apply_noise_mixing(self, waveform):
         """Add background noise to the audio"""
@@ -280,7 +280,7 @@ class Dataset(Dataset):
 
                 if self.augmentation.get('noise_mixing', False):
                     waveform = self._apply_noise_mixing(waveform)
-
+                
                 if self.augmentation.get('rir_mixing', False):
                     waveform = self._apply_rir_mixing(waveform)
 

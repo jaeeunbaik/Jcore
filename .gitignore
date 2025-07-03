@@ -15,3 +15,5 @@ tmp*
 pymp*/
 *.pt
 *.csv
+models/kor-ASR-2
+models/stats

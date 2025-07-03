@@ -2,12 +2,16 @@
 🖤🐰 JaeEun Baik, 2025
 """
 
-import numpy
+import numpy as np
+import os
 import logging
 import torch
 import torchaudio
 import torch.nn as nn
 import sentencepiece as spm
+import kenlm
+from warprnnt_pytorch import RNNTLoss as WarpRNNTLoss
+from typing import Tuple
 
 from argparse import Namespace
 from torchaudio.models.decoder import ctc_decoder
@@ -21,9 +25,12 @@ from modules.decoder.label_smoothing_loss import LabelSmoothingLoss
 from util.utils_text import ErrorCalculator, add_sos_eos, get_lm_file_paths
 from util.utils_module import target_mask, th_accuracy
 from util.utils_decoding import rnnt_greedy_search, rnnt_beam_search, transformer_beam_search, transformer_greedy_decode, CTCPrefixScore, CTCPrefixScorer, GreedyCTCDecoder
+from util.utils_lm import KenLMWrapper
 
 CTC_LOSS_THRESHOLD = 10000
 CTC_SCORING_RATIO = 1.5
+
+
 
 class e2eASR(nn.Module):
     def __init__(
@@ -80,6 +87,7 @@ class e2eASR(nn.Module):
             self.joiner = Joiner(input_dim=self.encoder_config.encoder_dim,
                                  output_dim=self.decoder_config.odim)
             self.ctc_weight = 0.0
+            self.rnnt_loss = WarpRNNTLoss(blank=self.blank, reduction='mean') 
             
         elif self.decoder_type == "transformer":
             self.decoder = TransformerDecoder(self.odim)
@@ -91,6 +99,9 @@ class e2eASR(nn.Module):
             self.ctc_weight = 0.0
 
         self.rnnlm = None
+        self.kenlm_path = None
+        if self.decoder_config.lm is not None and self.decoder_config.lm.endswith('.arpa'):
+            self.kenlm_path = self.decoder_config.lm
         self._init_parameters()
 
 
@@ -100,13 +111,6 @@ class e2eASR(nn.Module):
             if p.dim() > 1: # 1D 텐서 (bias)는 초기화하지 않음
                 nn.init.xavier_uniform_(p)
 
-        # RNN (LSTM/GRU) 특정 초기화: PyTorch의 기본 초기화는 괜찮지만, 명시적으로 할 경우
-        # LSTM/GRU의 weight_ih (input-hidden)와 weight_hh (hidden-hidden)는 다르게 초기화하는 경우가 많습니다.
-        # 여기서는 xavier_uniform_이 이미 모든 2D 이상 텐서에 적용되었으므로,
-        # 추가적인 명시적 LSTM/GRU 초기화는 PyTorch 기본 초기화와 유사하게 동작할 수 있습니다.
-        # 만약 별도의 초기화가 필요하다면, Predictor 모듈 내부에 해당 로직을 추가하는 것이 더 적합합니다.
-
-        # 예시: Predictor의 LSTM/GRU 가중치만 특별히 초기화하고 싶을 경우
         if self.decoder_type == "rnnt" and hasattr(self.predictor, 'rnn'):
             for name, param in self.predictor.rnn.named_parameters():
                 if 'weight_ih' in name: # input-hidden weights
@@ -115,12 +119,7 @@ class e2eASR(nn.Module):
                     nn.init.orthogonal_(param.data) # 직교 초기화가 LSTM에 효과적일 수 있음
                 elif 'bias' in name:
                     nn.init.constant_(param.data, 0)
-                    # LSTM forget gate bias 초기화 (0.5 또는 1.0)
-                    if 'bias_ih_l' in name: # input-hidden bias
-                        # Forget gate bias for LSTM (bias_ih_lX.chunk(4)[1])
-                        # This assumes standard LSTM bias layout: i,f,g,o
-                        # If your LSTM is not standard, this might need adjustment.
-                        # For simple RNNs or GRUs, this isn't applicable.
+                    if 'bias_ih_l' in name: 
                         if 'lstm' in self.predictor.layer_type:
                            num_gates = param.data.shape[0] // 4
                            param.data[num_gates : 2 * num_gates].fill_(1.0) # Forget gate bias to 1.0
@@ -150,27 +149,96 @@ class e2eASR(nn.Module):
         max_hs_length = hs_pad.size(1)
         hs_mask = (torch.arange(max_hs_length, device=hs_pad.device).unsqueeze(0) < hs_lengths.unsqueeze(1)).unsqueeze(1)
 
-        
+        # loss_rnnt = None
+        # if self.decoder_type == 'rnnt':
+        #     batch_size = xs_pad.size(0)
+        #     current_device = xs_pad.device
+            
+        #     zeros_for_predictor = torch.full((batch_size, 1), self.blank, dtype=torch.int32, device=current_device)
+        #     predictor_input_y = torch.cat((zeros_for_predictor, ys_pad), dim=1)
+        #     predictor_input_y_lengths = ylens + 1 
+
+        #     # Predictor 호출
+        #     pred, _ = self.predictor(y=predictor_input_y, y_lengths=predictor_input_y_lengths)
+        #     # pred의 차원: (B, max_target_len_in_batch + 1, D_pred)
+            
+        #     # Joiner 호출
+        #     logits = self.joiner(hs_pad, pred)
+        #     # logit의 차원: (B, T, U+1, V) 
+        #     # where T is max_hs_length, U+1 is max_predictor_input_len
+
+        #     # RNNT Loss의 targets (pure labels) 준비: ys_pad에서 특수 토큰 제거
+        #     special_ids_for_rnnt_target = [self.ignore_id, self.sos, self.eos, self.blank] 
+        #     rnnt_targets_list = []  
+        #     rnnt_target_lengths_list = []
+
+        #     for y_seq_tensor, current_ylen in zip(ys_pad, ylens):
+        #         actual_seq = [
+        #             token_id for token_id in y_seq_tensor[:current_ylen].tolist()
+        #             if token_id not in special_ids_for_rnnt_target
+        #         ]
+        #         rnnt_targets_list.append(actual_seq)
+        #         rnnt_target_lengths_list.append(len(actual_seq))
+            
+        #     max_rnnt_target_len = max(rnnt_target_lengths_list) if rnnt_target_lengths_list else 0
+
+        #     targets_for_rnnt_loss = torch.full(
+        #         (batch_size, max_rnnt_target_len),
+        #         fill_value=self.blank, # 여기서는 blank가 아니라 self.ignore_id (패딩용)을 사용하거나, 아니면 0이 아닌 다른 명확한 패딩 ID를 쓰는 것이 좋습니다.
+        #                                 # torchaudio.functional.rnnt_loss가 targets에서 blank를 제외하므로 blank(0)으로 패딩해도 문제 없음.
+        #         dtype=torch.int32,
+        #         device=current_device
+        #     )
+        #     for i, seq in enumerate(rnnt_targets_list):
+        #         if len(seq) > 0:
+        #             targets_for_rnnt_loss[i, :len(seq)] = torch.tensor(
+        #                 seq,
+        #                 dtype=torch.int32,
+        #                 device=current_device
+        #             )
+                    
+        #     target_lengths_for_rnnt_loss = torch.tensor(rnnt_target_lengths_list, dtype=torch.int32, device=current_device)
+
+        #     max_hs_length_in_batch = hs_lengths.max().item()
+        #     if logits.shape[1] > max_hs_length_in_batch:
+        #         logits = logits[:, :max_hs_length_in_batch, :, :]
+            
+        #     # logit의 세 번째 차원 (U+1)을 (rnnt_target_lengths + 1)에 맞춤
+        #     max_predictor_output_len = predictor_input_y_lengths.max().item()
+        #     if logits.shape[2] > max_predictor_output_len: # max_rnnt_target_len + 1
+        #         logits = logits[:, :, :max_predictor_output_len, :]
+
+        #     logits = logits.contiguous() 
+            
+        #     loss_rnnt = self.rnnt_loss(logits, targets_for_rnnt_loss, hs_lengths, target_lengths_for_rnnt_loss)
+
         # 2. rnnt loss
         loss_rnnt = None
         if self.decoder_type == 'rnnt':
             batch_size = xs_pad.size(0)
             current_device = xs_pad.device
             
+            # Predictor 입력 준비: ys_pad 앞에 blank 토큰 추가
+            # ys_pad는 (B, U) 형태이며, RNN-T Predictor는 (B, U+1) 형태의 입력을 받습니다.
+            # 첫 번째 토큰은 항상 blank (0)으로 시작합니다.
             zeros_for_predictor = torch.full((batch_size, 1), self.blank, dtype=torch.int32, device=current_device)
             predictor_input_y = torch.cat((zeros_for_predictor, ys_pad), dim=1)
-            predictor_input_y_lengths = ylens + 1 
-
+            predictor_input_y_lengths = ylens + 1 # Predictor 입력 길이는 레이블 길이 + 1 (blank 토큰 포함)
             # Predictor 호출
             pred, _ = self.predictor(y=predictor_input_y, y_lengths=predictor_input_y_lengths)
             # pred의 차원: (B, max_target_len_in_batch + 1, D_pred)
             
             # Joiner 호출
+            # hs_pad: (B, T, D_enc)
+            # pred: (B, U+1, D_pred)
             logits = self.joiner(hs_pad, pred)
-            # logit의 차원: (B, T, U+1, V) 
+            logits = logits.to(torch.float32)
+            
+            # logit의 차원: (B, T, U+1, V)
             # where T is max_hs_length, U+1 is max_predictor_input_len
-
-            # RNNT Loss의 targets (pure labels) 준비: ys_pad에서 특수 토큰 제거
+            
+            # logits의 T 차원 (인코더 출력 길이)을 hs_lengths에 맞게 자릅니다.
+            # hs_lengths는 인코더의 실제 출력 길이이므로, logits의 T 차원도 이에 맞춰야 합니다.
             special_ids_for_rnnt_target = [self.ignore_id, self.sos, self.eos, self.blank] 
             rnnt_targets_list = []  
             rnnt_target_lengths_list = []
@@ -183,6 +251,15 @@ class e2eASR(nn.Module):
                 rnnt_targets_list.append(actual_seq)
                 rnnt_target_lengths_list.append(len(actual_seq))
             
+            max_hs_length_in_batch = hs_lengths.max().item()
+            if logits.shape[1] > max_hs_length_in_batch:
+                logits = logits[:, :max_hs_length_in_batch, :, :]
+            
+            # logits의 U+1 차원 (Predictor 출력 길이)을 predictor_input_y_lengths에 맞게 자릅니다.
+            max_predictor_output_len = predictor_input_y_lengths.max().item()
+            if logits.shape[2] > max_predictor_output_len:
+                logits = logits[:, :, :max_predictor_output_len, :]
+            logits = logits.contiguous() # RNNT Loss 계산을 위해 contiguous 메모리 할당 보장
             max_rnnt_target_len = max(rnnt_target_lengths_list) if rnnt_target_lengths_list else 0
 
             targets_for_rnnt_loss = torch.full(
@@ -202,31 +279,11 @@ class e2eASR(nn.Module):
                     
             target_lengths_for_rnnt_loss = torch.tensor(rnnt_target_lengths_list, dtype=torch.int32, device=current_device)
 
-            # logits 차원 조정: rnnt_loss는 logit의 T 차원이 logit_lengths(hs_lengths), U+1 차원이 target_lengths_for_rnnt_loss + 1과 일치해야 합니다.
-            # hs_lengths는 encoder 출력의 실제 길이, target_lengths_for_rnnt_loss는 RNN-T loss target의 실제 길이 (U)
-            # logit의 두 번째 차원 (T)을 hs_lengths에 맞춤
-            max_hs_length_in_batch = hs_lengths.max().item()
-            if logits.shape[1] > max_hs_length_in_batch:
-                logits = logits[:, :max_hs_length_in_batch, :, :]
-            
-            # logit의 세 번째 차원 (U+1)을 (rnnt_target_lengths + 1)에 맞춤
-            max_predictor_output_len = predictor_input_y_lengths.max().item()
-            if logits.shape[2] > max_predictor_output_len: # max_rnnt_target_len + 1
-                logits = logits[:, :, :max_predictor_output_len, :]
+            ys_pad = ys_pad.to(torch.int32)
+            ylens = ylens.to(torch.int32)
 
-            logits = logits.contiguous() 
-            
-            loss_rnnt = torchaudio.functional.rnnt_loss(
-                logits=logits,
-                targets=targets_for_rnnt_loss, # Blank, SOS, EOS, ignore_id가 제거된 순수 레이블 시퀀스
-                logit_lengths=hs_lengths, # 인코더 출력의 실제 길이 (T)
-                target_lengths=target_lengths_for_rnnt_loss, # RNN-T targets의 실제 길이 (U)
-                blank=self.blank, # RNNT loss가 사용하는 blank ID
-                reduction="mean"
-            )
-            loss_att = None # RNNT 타입일 때는 attention loss는 None
-            self.acc = None
-            
+            loss_rnnt = self.rnnt_loss(logits, targets_for_rnnt_loss, hs_lengths, target_lengths_for_rnnt_loss).mean()
+
         # 3. decoder loss   
         if self.decoder_type in ["transformer", "hybrid"]:
             ys_in_pad, ys_out_pad = add_sos_eos(
@@ -301,7 +358,7 @@ class e2eASR(nn.Module):
         enc_output, *_ = self.encoder(x, ilens)
         return enc_output.squeeze(0)
 
-    def recognize(self, x, ilens, y, ylens, recog_args, rnnlm=None, use_jit=False):
+    def recognize(self, x, ilens, y, ylens, recog_args, use_jit=False):
         """Recognize input speech.
 
         :param ndnarray x: input acoustic feature (B, T, D) or (T, D)
@@ -314,6 +371,9 @@ class e2eASR(nn.Module):
         sp.load(self.tokenizer_path)
         
         labels = [sp.id_to_piece(i) for i in range(self.odim)]
+        
+        if self.kenlm_path:
+            lm = KenLMWrapper(self.kenlm_path, sp)
         
         enc_output = self.encode(x, ilens)
         if enc_output.dim() == 2:
@@ -368,7 +428,15 @@ class e2eASR(nn.Module):
                 if self.decoder_config.decoding_method == 'greedy':
                     hyp = rnnt_greedy_search(self.predictor, self.joiner, encoder_out_i, self.blank, current_device)
                 elif self.decoder_config.decoding_method == 'beamsearch':
-                    hyp = rnnt_beam_search(ylens, self.predictor, self.joiner, encoder_out_i, self.decoder_config.beam_size, self.blank, current_device)
+                    hyp = rnnt_beam_search(ylens, 
+                                           self.predictor, 
+                                           self.joiner, 
+                                           encoder_out_i, 
+                                           self.decoder_config.beam_size, 
+                                           self.blank, 
+                                           current_device, 
+                                           lm=lm, 
+                                           lm_weight=self.decoder_config.lm_weight)
                 else:
                     raise ValueError(f'Unsupported decoding method: {self.decoder_config.decoding_method}')
                 
@@ -411,3 +479,5 @@ class e2eASR(nn.Module):
             else:
                 raise ValueError(f'Unsupported decoding method for Transformer: {self.decoding_type}')
         return []
+
+

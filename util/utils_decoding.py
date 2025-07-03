@@ -1,264 +1,77 @@
-
 import torch
 import numpy as np
-import math
+import logging
+import os
+from typing import List, Tuple, Optional, Union
+import sentencepiece as spm
+import torch.nn as nn
+import kenlm
 
 from distutils.version import LooseVersion
-from itertools import groupby
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
+
 
 is_torch_1_2_plus = LooseVersion(torch.__version__) >= LooseVersion("1.2.0")
 # LooseVersion('1.2.0') == LooseVersion(torch.__version__) can't include e.g. 1.2.0+aaa
 is_torch_1_2 = (
     LooseVersion("1.3") > LooseVersion(torch.__version__) >= LooseVersion("1.2")
 )
-datatype = torch.bool if is_torch_1_2_plus else torch.uint8
+datatype = torch.bool if is_torch_1_2_plus else torch.uint85
 
 
-class TMHypothesis:
-    def __init__(self, tokens: List[int], log_prob: float, decoder_input_tensor: torch.Tensor, decoder_state: List[Any] = None):
-        self.tokens = tokens
-        self.log_prob = log_prob
-        self.decoder_input_tensor = decoder_input_tensor
-        self.decoder_state = decoder_state # 각 디코더 레이어의 캐시를 저장할 필드
+@dataclass
+class CustomFilePaths:
+    lexicon: Optional[str] = None
+    tokens: Optional[str] = None
+    lm: Optional[str] = None
 
-    def __lt__(self, other):
-        return self.log_prob < other.log_prob
-
-    def __repr__(self):
-        return f"Hyp(tokens={self.tokens}, log_prob={self.log_prob:.2f})"
-
-
-def transformer_greedy_decode(
-    model,  # e2eASR 모델 인스턴스 (self.decoder에 접근하기 위해)
-    encoder_output: torch.Tensor,  # (1, T_enc, D_model) - 인코더 최종 출력
-    sos_id: int,  # Start of Sequence 토큰 ID
-    eos_id: int,  # End of Sequence 토ken ID
-    max_len: int,  # 최대 디코딩 길이
-    device: torch.device,
-) -> List[int]:
+def get_lm_file_paths(base_dir: str) -> CustomFilePaths:
     """
-    Transformer Decoder를 위한 Greedy Decoding 함수.
-    model.decoder.score 메서드를 활용하여 효율적인 디코딩을 수행합니다.
+    주어진 디렉토리에서 언어 모델 관련 파일(lexicon, tokens, lm)의 경로를 찾습니다.
 
     Args:
-        model: Transformer Decoder를 포함하는 전체 ASR 모델 또는 Decoder 모듈.
-               여기서는 `model.decoder.score`를 호출할 수 있다고 가정합니다.
-        encoder_output: 인코더에서 나온 출력 텐서. (1, T_enc, D_model) 형태.
-        sos_id: 시작 토큰 ID.
-        eos_id: 종료 토큰 ID.
-        max_len: 생성할 시퀀스의 최대 길이.
-        device: 디코딩을 수행할 디바이스 (CPU 또는 CUDA).
+        base_dir (str): 언어 모델 관련 파일들이 존재하는 상위 폴더 경로.
 
     Returns:
-        디코딩된 토큰 ID 리스트 (SOS 및 EOS 제외).
+        CustomFilePaths: lm, lexicon, tokens 파일 경로를 담은 데이터 클래스.
+                         파일이 없으면 해당 필드는 None으로 유지됩니다.
     """
-    # 초기 디코더 입력: SOS 토큰
-    # `score` 메서드는 `ys`를 (1,) 형태의 텐서로 받으므로, 스칼라로 변환
-    current_token = torch.tensor([sos_id], dtype=torch.long, device=device)
+    found_lexicon = None
+    found_tokens = None
+    found_lm = None
+
+    # 디렉토리 내의 파일들을 탐색
+    for root, _, files in os.walk(base_dir):
+        for file in files:
+            file_path = os.path.join(root, file)
+            if file == "lexicon.txt":
+                found_lexicon = file_path
+            elif file == "tokens.txt":
+                found_tokens = file_path
+            elif file.endswith(".bin") and "lm" in file:
+                found_lm = file_path
+
+    return CustomFilePaths(lexicon=found_lexicon, tokens=found_tokens, lm=found_lm)
+
+class KenLMWrapper:
+    def __init__(self, lm_path: str, sp_processor: spm.SentencePieceProcessor):
+        if not os.path.exists(lm_path):
+            raise FileNotFoundError(f"KenLM model not found at {lm_path}")
+        
+        # logging.info(f"Loading KenLM model from {lm_path}...")
+        self.lm = kenlm.LanguageModel(lm_path) # KenLM 모델 로드
+        self.sp = sp_processor
+        self.vocab_size = sp_processor.get_piece_size() # vocab_size 추가
+        # logging.info("KenLM model loaded.")
+
+        self.unk_id = self.sp.unk_id() 
+        
+    def get_initial_lm_state(self) -> kenlm.State:
+        state = kenlm.State()
+        self.lm.BeginSentenceWrite(state) # 문장 시작 컨텍스트로 상태 초기화
+        return state 
     
-    decoded_tokens = []
-    decoder_states = None # 초기 캐시 상태는 None (첫 스텝에서 초기화됨)
-
-    # 인코더 출력을 score 메서드가 기대하는 형태로 준비 (1, T_enc, D_model)
-    # encoder_output_for_decoder = encoder_output.squeeze(0) # (T_enc, D_model)
-    # score 메서드는 ys.unsqueeze(0), x.unsqueeze(0)를 내부에서 처리하므로,
-    # encoder_output을 그대로 전달해도 됩니다.
-
-    for _ in range(max_len):
-        # model.decoder.score를 호출하여 다음 토큰의 로그 확률과 업데이트된 상태를 얻습니다.
-        # logp: (1, vocab_size) 형태, new_states: List[Any] (각 디코더 레이어의 캐시)
-        log_probs_next_token, new_decoder_states = model.decoder.score(
-            current_token, 
-            decoder_states, 
-            encoder_output
-        )
-        
-        # 가장 확률이 높은 토큰 선택
-        # log_probs_next_token은 (1, vocab_size) 형태이므로 argmax(dim=-1) 사용
-        next_token_id = log_probs_next_token.argmax(dim=-1).item()
-        
-        if next_token_id == eos_id:
-            break # EOS 토큰을 만나면 디코딩 종료
-        
-        decoded_tokens.append(next_token_id)
-        
-        # 다음 스텝을 위해 현재 토큰과 디코더 상태 업데이트
-        current_token = torch.tensor([next_token_id], dtype=torch.long, device=device)
-        decoder_states = new_decoder_states
-        
-    return decoded_tokens
-    
-    
-    
-def transformer_beam_search(
-    model,  # e2eASR 모델 인스턴스 (self.decoder에 접근하기 위해)
-    encoder_output: torch.Tensor,  # (1, T_enc, D_model) - 인코더 최종 출력
-    sos_id: int,  # Start of Sequence 토큰 ID
-    eos_id: int,  # End of Sequence 토큰 ID
-    max_len: int,  # 최대 디코딩 길이
-    beam_size: int,  # 빔 크기
-    device: torch.device,
-) -> List[int]:
-    """
-    Transformer Decoder를 위한 Beam Search Decoding 함수.
-    forward_one_step 메서드를 활용하여 효율적인 디코딩을 수행합니다.
-
-    Args:
-        model: Transformer Decoder를 포함하는 전체 ASR 모델 또는 Decoder 모듈.
-               여기서는 `model.decoder.batch_score` 또는 `model.decoder.forward_one_step`
-               을 호출할 수 있다고 가정합니다.
-        encoder_output: 인코더에서 나온 출력 텐서. (1, T_enc, D_model) 형태.
-        sos_id: 시작 토큰 ID.
-        eos_id: 종료 토큰 ID.
-        max_len: 생성할 시퀀스의 최대 길이.
-        beam_size: 빔 크기.
-        device: 디코딩을 수행할 디바이스 (CPU 또는 CUDA).
-
-    Returns:
-        가장 높은 점수를 가진 디코딩된 토큰 ID 리스트 (EOS 제외).
-    """
-    # 인코더 출력은 모든 빔에 대해 동일하게 사용되므로,
-    # (batch_size, T_enc, D_model) 형태로 미리 준비해 둡니다.
-    # 여기서는 단일 샘플에 대해 추론하므로 (1, T_enc, D_model) 입니다.
-    # batch_score를 사용할 때는 n_batch 만큼 확장해야 합니다.
-    # n_batch = beam_size (매 스텝마다)
-    expanded_encoder_output = encoder_output.repeat(beam_size, 1, 1)
-
-    # 초기 가설 생성 (SOS 토큰만 포함)
-    # TMHypothesis에 decoder_state 필드를 추가합니다.
-    # 초기 스텝에서는 decoder_state가 None이 됩니다.
-    initial_hypothesis = TMHypothesis(
-        tokens=[sos_id],
-        log_prob=0.0,
-        decoder_input_tensor=torch.tensor([[sos_id]], dtype=torch.long, device=device),
-        decoder_state=None # 첫 스텝이므로 캐시는 None
-    )
-    beams = [initial_hypothesis]
-    
-    # 완료된 가설들
-    completed_hypotheses = []
-
-    for _ in range(max_len):
-        if not beams:
-            break # 더 이상 탐색할 빔이 없으면 종료
-
-        # 현재 빔들을 디코더 입력 및 상태로 준비
-        current_decoder_inputs = []
-        current_decoder_states = []
-        
-        # 현재 빔의 수를 동적으로 가져옵니다. (빔 서치 과정에서 빔의 수가 beam_size보다 적을 수 있음)
-        num_current_beams = len(beams)
-
-        for hyp in beams:
-            # forward_one_step은 마지막 토큰 하나를 입력으로 받습니다.
-            current_decoder_inputs.append(hyp.decoder_input_tensor[:, -1:]) # (1, 1) 형태의 텐서
-            current_decoder_states.append(hyp.decoder_state)
-        
-        # current_decoder_inputs를 하나의 배치 텐서로 합칩니다.
-        # (num_current_beams, 1)
-        batched_decoder_inputs = torch.cat(current_decoder_inputs, dim=0)
-
-        # model.decoder.batch_score 활용 (가장 효율적)
-        # model.decoder는 TransformerDecoder 인스턴스라고 가정
-        # batch_score는 ys (batch, ylen) 형태, states (List[List[Any]]) 형태, xs (batch, xlen, n_feat) 형태를 기대
-        
-        # encoder_output을 현재 빔 수에 맞게 확장
-        encoder_output_for_batch = encoder_output.repeat(num_current_beams, 1, 1)
-
-        # batch_score는 ys(batch, ylen)을 받는데, ylen은 항상 1이어야 합니다 (현재 토큰만).
-        # ys를 (num_current_beams, 1) 형태로 전달.
-        # states는 List[List[Any]] 형태로 각 빔의 레이어별 캐시를 담고 있어야 합니다.
-        # initial_hypothesis.decoder_state는 None이므로, 첫 스텝에서는 [None] * num_current_beams를 전달
-        
-        # 첫 스텝이거나 이전 스텝에서 모든 빔의 상태가 None이었다면, None으로 채워진 리스트를 전달
-        # 그렇지 않으면, 기존의 decoder_state 리스트를 그대로 전달
-        if current_decoder_states[0] is None:
-            states_for_batch_score = [None] * num_current_beams
-        else:
-            # states: List[Any] (num_current_beams)
-            # states[i]는 i번째 빔의 캐시 (List[Tensor])
-            # batch_score는 List[List[Any]]를 기대하므로, current_decoder_states가 바로 그 형태.
-            states_for_batch_score = current_decoder_states
-
-
-        # logp: (num_current_beams, odim), new_states: List[List[Any]] (num_current_beams, n_layers, ...)
-        log_probs_next_tokens_batch, new_decoder_states_batch = model.decoder.batch_score(
-            batched_decoder_inputs,  # (num_current_beams, 1)
-            states_for_batch_score,  # List[Any] of decoder states (num_current_beams)
-            encoder_output_for_batch # (num_current_beams, T_enc, D_model)
-        )
-        
-        # 새로운 빔 후보들을 저장할 리스트
-        new_beams_candidates = []
-
-        for i, hyp in enumerate(beams):
-            log_probs = log_probs_next_tokens_batch[i] # (vocab_size,)
-            
-            # topK개의 다음 토큰 후보 선택
-            topk_log_probs, topk_indices = torch.topk(log_probs, k=beam_size, dim=-1)
-            
-            current_hyp_new_state = new_decoder_states_batch[i] # 이 빔에 대한 새로운 캐시 상태
-
-            for log_prob_val, token_id in zip(topk_log_probs.tolist(), topk_indices.tolist()):
-                new_log_prob = hyp.log_prob + log_prob_val
-                new_tokens = hyp.tokens + [token_id]
-                
-                # 새로운 디코더 입력 텐서 생성: 다음 스텝을 위해 새로운 토큰만 추가
-                # 이것은 다음에 model.decoder.batch_score가 받을 입력이 됩니다.
-                # TMHypothesis 내부의 decoder_input_tensor는 전체 시퀀스를 추적하기 위해 유지.
-                next_decoder_input_token = torch.tensor([[token_id]], dtype=torch.long, device=device)
-                
-                new_hyp = TMHypothesis(
-                    tokens=new_tokens,
-                    log_prob=new_log_prob,
-                    decoder_input_tensor=next_decoder_input_token, # 다음 스텝에 입력될 마지막 토큰만 저장
-                    decoder_state=current_hyp_new_state # 업데이트된 캐시 저장
-                )
-                
-                new_beams_candidates.append(new_hyp)
-        
-        # 모든 후보 빔을 점수 기준으로 정렬하고 상위 beam_size개 선택
-        new_beams_candidates.sort(key=lambda x: x.log_prob, reverse=True)
-        beams = new_beams_candidates[:beam_size]
-        
-        # EOS 토큰을 만난 가설은 completed_hypotheses로 이동
-        next_beams = []
-        for hyp in beams:
-            if hyp.tokens and hyp.tokens[-1] == eos_id:
-                completed_hypotheses.append(hyp)
-            else:
-                next_beams.append(hyp)
-        beams = next_beams
-
-        # 조기 종료 조건: 모든 빔이 EOS에 도달했거나, 더 이상 빔이 없거나
-        if not beams and completed_hypotheses:
-            break
-            
-    # 만약 max_len에 도달했는데 completed_hypotheses가 비어있다면,
-    # 현재 남아있는 빔 중에서 가장 좋은 가설을 선택합니다.
-    if not completed_hypotheses and beams:
-        completed_hypotheses = beams
-
-    if not completed_hypotheses:
-        return [] # 디코딩 실패
-
-    # 가장 높은 점수를 가진 최종 가설 선택 (길이 정규화 등을 고려할 수 있음)
-    # 길이 정규화: len(x.tokens) - 1 (SOS 제외)
-    # 또는 len(x.tokens) (전체 길이)
-    best_hypothesis = max(completed_hypotheses, key=lambda x: x.log_prob / (len(x.tokens) - 1 if len(x.tokens) > 1 else 1)) 
-    
-    # SOS, EOS 토큰 제거 후 반환
-    final_tokens = best_hypothesis.tokens
-    if final_tokens and final_tokens[0] == sos_id:
-        final_tokens = final_tokens[1:] # SOS 제거
-    if final_tokens and final_tokens[-1] == eos_id:
-        final_tokens = final_tokens[:-1] # EOS 제거
-
-    return final_tokens
-
-
 
 def rnnt_greedy_search(decoder, joiner, encoder_out: torch.Tensor, blank_id, device) -> List[int]:
     """
@@ -327,52 +140,68 @@ class TransducerHypothesis:
     # Optional decoder state. We assume it is LSTM for now,
     # so the state is a tuple (h, c)
     decoder_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-
-
-def rnnt_beam_search(ylens, predictor, joiner, encoder_out: torch.Tensor, beam_size, blank_id, device, lm=None, lm_weight=0.0) -> List[int]:
+def rnnt_beam_search(
+    ylens, 
+    predictor, 
+    joiner, 
+    encoder_out: torch.Tensor, 
+    beam_size: int, 
+    blank_id: int, 
+    device: torch.device, 
+    lm: Optional[Union[nn.Module, KenLMWrapper]]=None,
+    lm_weight: float=0.0
+) -> List[int]:
+    
     # Initialize beam candidates
     initial_tokens = torch.tensor([blank_id], device=device, dtype=torch.int32)
-    # LM 상태도 빔에 추가
-    beams = [{"score": 0.0, "tokens": initial_tokens, "predictor_states": None, "lm_states": None}]
+    beams = [] 
+    for _ in range(beam_size): 
+        initial_lm_state = None
+        if lm is not None and isinstance(lm, KenLMWrapper):
+            initial_lm_state = lm.get_initial_lm_state()
+        
+        beams.append({
+            "score": 0.0, 
+            "tokens": initial_tokens, 
+            "predictor_states": None, 
+            "lm_states": initial_lm_state
+        })
 
     time_steps = encoder_out.size(1)
-    max_decode_steps = int(time_steps) * 2
+    max_decode_steps = int(time_steps) * 2 
+
+    is_lstm = isinstance(predictor.rnn, torch.nn.LSTM)
+    is_gru = isinstance(predictor.rnn, torch.nn.GRU) 
 
     for t in range(time_steps):
-        new_beams_at_t = []
+        new_beams_at_t = [] 
 
-        # Predictor (RNN-T Decoder) 관련 배치 처리
         current_tokens_batch = torch.cat([b["tokens"][-1:].unsqueeze(0) for b in beams], dim=0)
-        num_layers_directions = predictor.rnn.num_layers * (2 if predictor.rnn.bidirectional else 1)
+        
+        num_layers_directions = predictor.rnn.num_layers * (2 if predictor.rnn.bidirectional else 1) 
         hidden_size = predictor.hidden_dim
 
-        if isinstance(predictor.rnn, torch.nn.LSTM):
-            states_to_concat_h = []
-            states_to_concat_c = []
-            for b in beams:
-                if b["predictor_states"] is None:
-                    states_to_concat_h.append(torch.zeros(num_layers_directions, 1, hidden_size, device=device))
-                    states_to_concat_c.append(torch.zeros(num_layers_directions, 1, hidden_size, device=device))
-                else:
-                    states_to_concat_h.append(b["predictor_states"][0])
-                    states_to_concat_c.append(b["predictor_states"][1])
-                predictor_input_states = (torch.cat(states_to_concat_h, dim=1), torch.cat(states_to_concat_c, dim=1))
-        elif isinstance(predictor.rnn, torch.nn.GRU):
-            states_to_concat_h = []
-            for b in beams:
-                if b["predictor_states"] is None:
-                    states_to_concat_h.append(torch.zeros(num_layers_directions, 1, hidden_size, device=device))
-                else:
-                    states_to_concat_h.append(b["predictor_states"])
-                predictor_input_states = torch.cat(states_to_concat_h, dim=1)
+        predictor_input_states = None
+        if beams[0]["predictor_states"] is not None: 
+            if is_lstm: # LSTM인 경우 (h, c) 튜플 상태
+                h_states_to_concat = [b["predictor_states"][0] for b in beams]
+                c_states_to_concat = [b["predictor_states"][1] for b in beams]
+                predictor_input_states = (torch.cat(h_states_to_concat, dim=1), torch.cat(c_states_to_concat, dim=1))
+            elif is_gru: # GRU인 경우 단일 h 텐서 상태
+                h_states_to_concat = [b["predictor_states"] for b in beams]
+                predictor_input_states = torch.cat(h_states_to_concat, dim=1)
+            else:
+                raise TypeError(f"Unsupported RNN type in Predictor: {type(predictor.rnn)}")
             
-        predictor_y_lengths = torch.ones(current_tokens_batch.size(0), dtype=torch.long, device=device)
-        pred_out_batch, new_predictor_states_batch = predictor(y=current_tokens_batch, y_lengths=predictor_y_lengths, states=predictor_input_states)
+        pred_out_batch, new_predictor_states_batch = predictor(
+            y=current_tokens_batch, 
+            y_lengths=torch.ones(current_tokens_batch.size(0), dtype=torch.long, device=device), 
+            states=predictor_input_states
+        )
 
-        # LM 관련 배치 처리 (LM이 제공된 경우)
         lm_pred_out_batch = None
-        new_lm_states_batch = None
-        if lm is not None:
+
+        if lm is not None and isinstance(lm, nn.Module): 
             lm_input_states_h = []
             lm_input_states_c = []
             for b in beams:
@@ -384,72 +213,278 @@ def rnnt_beam_search(ylens, predictor, joiner, encoder_out: torch.Tensor, beam_s
                     lm_input_states_c.append(b["lm_states"][1])
             lm_input_states = (torch.cat(lm_input_states_h, dim=1), torch.cat(lm_input_states_c, dim=1))
 
-            # LM 예측
-            lm_pred_out_batch, new_lm_states_batch = lm(input_tokens=current_tokens_batch, states=lm_input_states)
-            lm_pred_out_batch = torch.log_softmax(lm_pred_out_batch, dim=-1) # LM log probs
-
+            lm_logits, new_lm_states_batch = lm(input_tokens=current_tokens_batch, states=lm_input_states)
+            lm_pred_out_batch = torch.log_softmax(lm_logits, dim=-1) # LM log probs
+            
+        elif lm is not None and not isinstance(lm, KenLMWrapper):
+            logging.warning(f"Unsupported LM type encountered: {type(lm)}. LM will be skipped.")
+            lm = None 
+            
         for i, beam in enumerate(beams):
-            if isinstance(predictor.rnn, torch.nn.LSTM):
+            extracted_predictor_states_i = None
+            if is_lstm:
                 extracted_predictor_states_i = (new_predictor_states_batch[0][:, i:i+1, :], new_predictor_states_batch[1][:, i:i+1, :])
-            elif isinstance(predictor.rnn, torch.nn.GRU):
+            elif is_gru:
                 extracted_predictor_states_i = new_predictor_states_batch[:, i:i+1, :]
             
             extracted_lm_states_i = None
-            if lm is not None:
-                extracted_lm_states_i = (new_lm_states_batch[0][:, i:i+1, :], new_lm_states_batch[1][:, i:i+1, :])
+            if lm is not None and isinstance(lm, KenLMWrapper):
+                extracted_lm_states_i = beam["lm_states"] 
+            elif lm is not None and isinstance(lm, nn.Module): # RNNLM/Transformer-LM
+                 extracted_lm_states_i = (new_lm_states_batch[0][:, i:i+1, :], new_lm_states_batch[1][:, i:i+1, :])
 
             pred_out_i = pred_out_batch[i:i+1] # (1, 1, D_pred)
-            enc_out_t = encoder_out[:, t:t+1, :] # (1, 1, C)
+            enc_out_t = encoder_out[:, t:t+1, :] # (1, 1, C_enc)
 
-            # Joiner 호출
             logits = joiner(enc_out_t, pred_out_i)
-            rnnt_log_probs = torch.log_softmax(logits, dim=-1).squeeze()
+            rnnt_log_probs = torch.log_softmax(logits, dim=-1).squeeze() # RNN-T의 로그 확률
 
-            # LM 점수 결합
             final_log_probs = rnnt_log_probs
             if lm is not None:
-                lm_log_probs_i = lm_pred_out_batch[i:i+1].squeeze()
-                final_log_probs = rnnt_log_probs + lm_weight * lm_log_probs_i # LM 가중치 적용
+                if isinstance(lm, KenLMWrapper):
+                    pass 
+                elif lm_pred_out_batch is not None: 
+                    lm_log_probs_i_tensor = lm_pred_out_batch[i, :] # 해당 빔의 LM 로그 확률 (1D 텐서)
+                    final_log_probs = rnnt_log_probs + lm_weight * lm_log_probs_i_tensor # RNN-T + LM 점수
 
             blank_score = final_log_probs[blank_id].item()
 
-            # Blank Path
             new_beams_at_t.append({
                 "score": beam["score"] + blank_score,
-                "tokens": beam["tokens"],
-                "predictor_states": beam["predictor_states"], # Blank 트랜지션 시 Predictor 상태 유지
-                "lm_states": beam["lm_states"], # Blank 트랜지션 시 LM 상태도 유지
+                "tokens": beam["tokens"], # 토큰 시퀀스 변화 없음
+                "predictor_states": beam["predictor_states"], # Predictor 상태 유지
+                "lm_states": beam["lm_states"], # LM 상태도 유지
             })
 
-            # Non-Blank Paths
             vocab_size = final_log_probs.size(-1)
             non_blank_indices = torch.arange(vocab_size, device=device)
             non_blank_indices = non_blank_indices[non_blank_indices != blank_id]
 
             non_blank_log_probs_filtered = final_log_probs[non_blank_indices]
 
-            topk_non_blank_size = min(beam_size -1, non_blank_log_probs_filtered.size(-1))
+            topk_non_blank_size = min(beam_size - 1, non_blank_log_probs_filtered.size(-1))
 
             if topk_non_blank_size > 0:
-                topk_scores_non_blank, topk_relative_indices = torch.topk(non_blank_log_probs_filtered, topk_non_blank_size, dim=-1)
+                topk_scores_rnnt, topk_relative_indices = torch.topk(non_blank_log_probs_filtered, topk_non_blank_size, dim=-1)
                 topk_tokens_non_blank = non_blank_indices[topk_relative_indices]
 
-                for score, token_id_tensor in zip(topk_scores_non_blank.tolist(), topk_tokens_non_blank):
-                    new_beams_at_t.append({
-                        "score": beam["score"] + score,
-                        "tokens": torch.cat((beam["tokens"], token_id_tensor.unsqueeze(0))),
-                        "predictor_states": extracted_predictor_states_i, # Non-blank 트랜지션 시 Predictor 상태 업데이트
-                        "lm_states": extracted_lm_states_i, # Non-blank 트랜지션 시 LM 상태 업데이트
-                    })
+                for rnnt_score, token_id_tensor in zip(topk_scores_rnnt.tolist(), topk_tokens_non_blank):
+                    token_id = token_id_tensor.item()
+                    
+                    new_lm_state_for_this_path = None
+                    lm_score_for_this_token = 0.0 # 기본값
 
-        # 모든 새로운 빔 후보들을 스코어 기준으로 정렬하고 beam_size만큼 가지치기
+                    if lm is not None and isinstance(lm, KenLMWrapper):
+                        token_str_to_score = lm.sp.id_to_piece(token_id)
+                        current_lm_state_for_path = beam["lm_states"] 
+                        new_kenlm_state = kenlm.State() 
+                        
+                        score_from_kenlm = lm.lm.BaseScore(current_lm_state_for_path, token_str_to_score, new_kenlm_state)
+                        
+                        lm_score_for_this_token = score_from_kenlm
+                        new_lm_state_for_this_path = new_kenlm_state
+                        
+                    elif lm is not None and isinstance(lm, nn.Module): 
+                        new_lm_state_for_this_path = extracted_lm_states_i
+                        if lm_pred_out_batch is not None:
+                            lm_score_for_this_token = lm_pred_out_batch[i, token_id].item()
+
+                    combined_score = rnnt_score + lm_weight * lm_score_for_this_token
+
+                    new_beams_at_t.append({
+                        "score": beam["score"] + combined_score,
+                        "tokens": torch.cat((beam["tokens"], token_id_tensor.unsqueeze(0))), 
+                        "predictor_states": extracted_predictor_states_i, 
+                        "lm_states": new_lm_state_for_this_path, 
+                    })
+                    
         beams = sorted(new_beams_at_t, key=lambda x: x["score"], reverse=True)[:beam_size]
-        # 조기 종료 조건: 모든 빔이 blank로 끝났거나, 최대 디코딩 길이에 도달했을 때
+        
         if all(b["tokens"][-1].item() == blank_id for b in beams) or t == max_decode_steps - 1:
             break
 
     best_beam = max(beams, key=lambda x: x["score"])
     final_tokens = [token.item() for token in best_beam["tokens"] if token.item() != blank_id]
+
+    return final_tokens
+
+class TMHypothesis:
+    def __init__(self, tokens: List[int], log_prob: float, decoder_input_tensor: torch.Tensor, decoder_state: List[Any] = None):
+        self.tokens = tokens
+        self.log_prob = log_prob
+        self.decoder_input_tensor = decoder_input_tensor
+        self.decoder_state = decoder_state # 각 디코더 레이어의 캐시를 저장할 필드
+
+    def __lt__(self, other):
+        return self.log_prob < other.log_prob
+
+    def __repr__(self):
+        return f"Hyp(tokens={self.tokens}, log_prob={self.log_prob:.2f})"
+
+
+def transformer_greedy_decode(
+    model, 
+    encoder_output: torch.Tensor,  # (1, T_enc, D_model) - 인코더 최종 출력
+    sos_id: int, 
+    eos_id: int, 
+    max_len: int, 
+    device: torch.device,
+) -> List[int]:
+    """
+    Args:
+        model: Transformer Decoder를 포함하는 전체 ASR 모델 또는 Decoder 모듈.
+               여기서는 `model.decoder.score`를 호출할 수 있다고 가정합니다.
+        encoder_output: 인코더에서 나온 출력 텐서. (1, T_enc, D_model) 형태.
+        sos_id: 시작 토큰 ID.
+        eos_id: 종료 토큰 ID.
+        max_len: 생성할 시퀀스의 최대 길이.
+        device: 디코딩을 수행할 디바이스 (CPU 또는 CUDA).
+
+    Returns:
+        디코딩된 토큰 ID 리스트 (SOS 및 EOS 제외).
+    """
+    current_token = torch.tensor([sos_id], dtype=torch.long, device=device)
+    
+    decoded_tokens = []
+    decoder_states = None
+
+    for _ in range(max_len):
+        log_probs_next_token, new_decoder_states = model.decoder.score(
+            current_token, 
+            decoder_states, 
+            encoder_output
+        )
+        
+        next_token_id = log_probs_next_token.argmax(dim=-1).item()
+        
+        if next_token_id == eos_id:
+            break 
+        
+        decoded_tokens.append(next_token_id)
+        
+        current_token = torch.tensor([next_token_id], dtype=torch.long, device=device)
+        decoder_states = new_decoder_states
+        
+    return decoded_tokens
+    
+    
+    
+def transformer_beam_search(
+    model, 
+    encoder_output: torch.Tensor,  
+    sos_id: int, 
+    eos_id: int, 
+    max_len: int,
+    beam_size: int,
+    device: torch.device,
+) -> List[int]:
+    """
+    Transformer Decoder를 위한 Beam Search Decoding 함수.
+    forward_one_step 메서드를 활용하여 효율적인 디코딩을 수행합니다.
+
+    Args:
+        model: Transformer Decoder를 포함하는 전체 ASR 모델 또는 Decoder 모듈.
+               여기서는 `model.decoder.batch_score` 또는 `model.decoder.forward_one_step`
+               을 호출할 수 있다고 가정합니다.
+        encoder_output: 인코더에서 나온 출력 텐서. (1, T_enc, D_model) 형태.
+        sos_id: 시작 토큰 ID.
+        eos_id: 종료 토큰 ID.
+        max_len: 생성할 시퀀스의 최대 길이.
+        beam_size: 빔 크기.
+        device: 디코딩을 수행할 디바이스 (CPU 또는 CUDA).
+
+    Returns:
+        가장 높은 점수를 가진 디코딩된 토큰 ID 리스트 (EOS 제외).
+    """
+    expanded_encoder_output = encoder_output.repeat(beam_size, 1, 1)
+
+    initial_hypothesis = TMHypothesis(
+        tokens=[sos_id],
+        log_prob=0.0,
+        decoder_input_tensor=torch.tensor([[sos_id]], dtype=torch.long, device=device),
+        decoder_state=None
+    )
+    beams = [initial_hypothesis]
+    
+    completed_hypotheses = []
+
+    for _ in range(max_len):
+        if not beams:
+            break
+
+        current_decoder_inputs = []
+        current_decoder_states = []
+        
+        num_current_beams = len(beams)
+
+        for hyp in beams:
+            current_decoder_inputs.append(hyp.decoder_input_tensor[:, -1:]) # (1, 1) 
+            current_decoder_states.append(hyp.decoder_state)
+        # (num_current_beams, 1)
+        batched_decoder_inputs = torch.cat(current_decoder_inputs, dim=0)
+
+        encoder_output_for_batch = encoder_output.repeat(num_current_beams, 1, 1)
+
+        if current_decoder_states[0] is None:
+            states_for_batch_score = [None] * num_current_beams
+        else:
+            states_for_batch_score = current_decoder_states
+
+        log_probs_next_tokens_batch, new_decoder_states_batch = model.decoder.batch_score(
+            batched_decoder_inputs,  # (num_current_beams, 1)
+            states_for_batch_score,  # List[Any] of decoder states (num_current_beams)
+            encoder_output_for_batch # (num_current_beams, T_enc, D_model)
+        )
+        
+        new_beams_candidates = []
+
+        for i, hyp in enumerate(beams):
+            log_probs = log_probs_next_tokens_batch[i] # (vocab_size,)
+            
+            topk_log_probs, topk_indices = torch.topk(log_probs, k=beam_size, dim=-1)
+            
+            current_hyp_new_state = new_decoder_states_batch[i] 
+
+            for log_prob_val, token_id in zip(topk_log_probs.tolist(), topk_indices.tolist()):
+                new_log_prob = hyp.log_prob + log_prob_val
+                new_tokens = hyp.tokens + [token_id]
+                next_decoder_input_token = torch.tensor([[token_id]], dtype=torch.long, device=device)
+                
+                new_hyp = TMHypothesis(
+                    tokens=new_tokens,
+                    log_prob=new_log_prob,
+                    decoder_input_tensor=next_decoder_input_token,
+                    decoder_state=current_hyp_new_state
+                )
+                
+                new_beams_candidates.append(new_hyp)
+        new_beams_candidates.sort(key=lambda x: x.log_prob, reverse=True)
+        beams = new_beams_candidates[:beam_size]
+        
+        next_beams = []
+        for hyp in beams:
+            if hyp.tokens and hyp.tokens[-1] == eos_id:
+                completed_hypotheses.append(hyp)
+            else:
+                next_beams.append(hyp)
+        beams = next_beams
+
+        if not beams and completed_hypotheses:
+            break
+            
+    if not completed_hypotheses and beams:
+        completed_hypotheses = beams
+
+    if not completed_hypotheses:
+        return [] # 디코딩 실패
+
+    best_hypothesis = max(completed_hypotheses, key=lambda x: x.log_prob / (len(x.tokens) - 1 if len(x.tokens) > 1 else 1)) 
+    
+    final_tokens = best_hypothesis.tokens
+    if final_tokens and final_tokens[0] == sos_id:
+        final_tokens = final_tokens[1:] 
+    if final_tokens and final_tokens[-1] == eos_id:
+        final_tokens = final_tokens[:-1]
 
     return final_tokens
 
@@ -489,8 +524,6 @@ class CTCPrefixScoreTH(object):
             if x.is_cuda
             else torch.device("cpu")
         )
-        # Pad the rest of posteriors in the batch
-        # TODO(takaaki-hori): need a better way without for-loops
         for i, l in enumerate(xlens):
             if l < self.input_length:
                 x[i, l:, :] = self.logzero

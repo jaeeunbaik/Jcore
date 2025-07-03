@@ -13,8 +13,6 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 
-
-
 class TokenProcessor:
     """Process text to BPE token ids using SentencePiece"""
     
@@ -27,12 +25,7 @@ class TokenProcessor:
         return torch.tensor(ids, dtype=torch.long)
     
     def id2text(self, tokens: List[int], filter_blank=False) -> str:
-        """
-        토큰 ID 목록을 텍스트로 변환하는 함수
-        범위를 벗어난 토큰은 자동으로 필터링합니다.
-        """
         try:
-            # 입력이 텐서인 경우 리스트로 변환
             if torch.is_tensor(tokens):
                 tokens = tokens.tolist()
             
@@ -244,83 +237,3 @@ def add_sos_eos(ys_pad, sos, eos, ignore_id):
     ys_in = [torch.cat([_sos, y], dim=0) for y in ys]
     ys_out = [torch.cat([y, _eos], dim=0) for y in ys]
     return pad_list(ys_in, eos), pad_list(ys_out, ignore_id)
-
-
-# torchaudio 내부의 FilePaths 클래스를 그대로 사용할 수 없으므로,
-# 동일한 구조의 dataclass를 직접 정의합니다.
-# 실제 torchaudio.models.decoder.ctc_decoder 함수는 이 구조를 기대합니다.
-@dataclass
-class CustomFilePaths:
-    lexicon: Optional[str] = None
-    tokens: Optional[str] = None
-    lm: Optional[str] = None
-
-def get_lm_file_paths(base_dir: str) -> CustomFilePaths:
-    """
-    주어진 디렉토리에서 언어 모델 관련 파일(lexicon, tokens, lm)의 경로를 찾습니다.
-
-    Args:
-        base_dir (str): 언어 모델 관련 파일들이 존재하는 상위 폴더 경로.
-
-    Returns:
-        CustomFilePaths: lm, lexicon, tokens 파일 경로를 담은 데이터 클래스.
-                         파일이 없으면 해당 필드는 None으로 유지됩니다.
-    """
-    found_lexicon = None
-    found_tokens = None
-    found_lm = None
-
-    # 디렉토리 내의 파일들을 탐색
-    for root, _, files in os.walk(base_dir):
-        for file in files:
-            file_path = os.path.join(root, file)
-
-            # 파일명 또는 확장자를 기준으로 파일을 식별합니다.
-            # 실제 사용되는 파일명/확장자에 따라 조건을 조정해야 합니다.
-            if file == "lexicon.txt": # 예시 파일명: lexicon.txt
-                found_lexicon = file_path
-            elif file == "tokens.txt": # 예시 파일명: tokens.txt
-                found_tokens = file_path
-            elif file.endswith(".bin") and "lm" in file: # 예시 확장자: .bin (KenLM 바이너리)
-                found_lm = file_path
-            # 다른 언어 모델 파일 형식 (예: .arpa)이 있다면 추가
-
-    return CustomFilePaths(lexicon=found_lexicon, tokens=found_tokens, lm=found_lm)
-
-# 사용 예시:
-if __name__ == "__main__":
-    from torchaudio.models.decoder import download_pretrained_files
-    
-    files = download_pretrained_files("librispeech-4-gram")
-    # 테스트를 위한 가상 디렉토리 생성
-    # test_dir = "lm_files_test"
-    # os.makedirs(test_dir, exist_ok=True)
-    # with open(os.path.join(test_dir, "lexicon.txt"), "w") as f: f.write("test lexicon")
-    # with open(os.path.join(test_dir, "tokens.txt"), "w") as f: f.write("test tokens")
-    # with open(os.path.join(test_dir, "kenlm.bin"), "w") as f: f.write("test lm binary")
-    # os.makedirs(os.path.join(test_dir, "subdir"), exist_ok=True)
-    # with open(os.path.join(test_dir, "subdir", "another_lm.bin"), "w") as f: f.write("another lm")
-
-
-    # # 함수 호출
-    # file_paths = get_lm_file_paths(test_dir)
-
-    # print(f"Lexicon Path: {file_paths.lexicon}")
-    # print(f"Tokens Path: {file_paths.tokens}")
-    # print(f"LM Path: {file_paths.lm}")
-
-    # # 모든 파일이 존재하는지 확인 (간단한 테스트)
-    # assert file_paths.lexicon is not None
-    # assert file_paths.tokens is not None
-    # assert file_paths.lm is not None
-
-    # # 존재하지 않는 파일에 대한 테스트 (예: tokens.txt 삭제 후)
-    # os.remove(os.path.join(test_dir, "tokens.txt"))
-    # file_paths_missing = get_lm_file_paths(test_dir)
-    # print(f"\nAfter deleting tokens.txt:")
-    # print(f"Tokens Path: {file_paths_missing.tokens}")
-    # assert file_paths_missing.tokens is None
-
-    # # 생성된 디렉토리 삭제
-    # import shutil
-    # shutil.rmtree(test_dir)

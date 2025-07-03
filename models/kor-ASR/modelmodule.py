@@ -77,7 +77,7 @@ class ModelModule(pl.LightningModule):
             return loss.get("loss")
     
     def validation_step(self, batch, batch_idx):
-        x, x_len, y, y_len, _ = batch 
+        x, x_len, y, y_len, wav_path = batch 
         
         self.model.eval()
 

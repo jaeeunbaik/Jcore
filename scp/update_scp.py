@@ -162,8 +162,7 @@ def truncate(input_file_path: str, output_file_path: str):
         input_file_path (str): 원본 train.scp 파일의 전체 경로.
         output_file_path (str): 필터링된 결과를 저장할 파일의 전체 경로.
     """
-    # allowed_prefixes = ['PA', 'HA']
-    allowed_prefixes = ['KsponSpeech_02', 'KsponSpeech_01']
+    allowed_prefixes = ['PA', 'PB', 'PC', 'HA', 'HB']
     
     try:
         with open(input_file_path, 'r', encoding='utf-8') as f_in, \
@@ -180,11 +179,11 @@ def truncate(input_file_path: str, output_file_path: str):
                     continue
 
                 original_audio_path = parts[0]
-                # folder = os.path.basename(os.path.dirname(original_audio_path))
+                folder = os.path.basename(os.path.dirname(original_audio_path))
                 
-                # prefix = folder[:2]
-                prefix = os.path.dirname(original_audio_path).split('/')[-2]
-                if prefix not in allowed_prefixes:
+                prefix = folder[:2]
+                # prefix = os.path.dirname(original_audio_path).split('/')[-2]
+                if prefix in allowed_prefixes:
                     f_out.write(line + "\n")
                 else:
                     print(f"라인 {line_num}: '{prefix}' 폴더는 허용되지 않습니다. 해당 라인을 건너뜁니다.")
@@ -200,14 +199,12 @@ def truncate(input_file_path: str, output_file_path: str):
 # --- 사용 예시 ---
 if __name__ == "__main__":
     # 1. 원본 train.scp 파일의 경로를 여기에 입력하세요.
-    original_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/순천향대test/testclean.scp'
+    original_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/AIHub_비대면진료/train.scp'
     
     # 2. 새로 생성될 train.scp 파일의 경로를 여기에 입력하세요.
-    # 이 경로는 원본 파일과 달라야 합니다. (혹은 원본을 덮어쓰고 싶다면 동일하게 설정)
-    # 안전하게 처리하기 위해서는 항상 새로운 파일로 저장하는 것을 권장합니다.
-    update_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/순천향대test/testclean_new.scp' 
-    output_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/순천향대test/testclean_token.scp'
-    out_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/ksponspeech/dev_trunc.scp'
+    update_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/AIHub_비대면진료/train_new.scp' 
+    output_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/kspon_aihub비대면/dev.scp'
+    out_scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/kspon_aihub비대면/dev_token.scp'
     # 3. 새로운 데이터셋 기본 경로를 여기에 입력하세요.
     new_base_directory = '/home/hdd1/jenny/AIHub_비대면진료'
 
@@ -217,9 +214,9 @@ if __name__ == "__main__":
 
     print(f"'{original_scp_file}' 파일을 처리하여 토큰화된 '{output_scp_file}'을 생성합니다...")
     # update_path(original_scp_file, update_scp_file, new_base_directory)
-    convert_num2word(original_scp_file, update_scp_file)
-    txt_to_token(update_scp_file, output_scp_file, spm_model_file)
-    # truncate(output_scp_file, out_scp_file)
+    # convert_num2word(original_scp_file, update_scp_file)
+    # truncate(update_scp_file, output_scp_file)
+    txt_to_token(output_scp_file, out_scp_file, spm_model_file)
     # --- 업데이트된 파일 내용 확인 (선택 사항) ---
     print(f"\n--- 업데이트된 '{output_scp_file}' 파일 내용 ---")
     try:

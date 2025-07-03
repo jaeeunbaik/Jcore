@@ -1,17 +1,17 @@
 dataloader:
-  batch_size: 2
-  num_workers: 4
+  batch_size: 8
+  num_workers: 16
   pin_memory: True
 data:
-  scp_dir: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/순천향대test/
+  scp_dir: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/kspon_aihub비대면/
   sample_rate: 16000
   n_mels: 80
   n_fft: 400
   win_length: 400
   hop_length: 160
   test_clean: True
-  audio_feature_mean: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/models/kor-ASR/data/stats/순천향대test/train_mean.pt # <-- 계산 후 저장된 파일 경로
-  audio_feature_std: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/models/kor-ASR/data/stats/순천향대test/train_std.pt   # <-- 계산 후 저장된 파일 경로
+  audio_feature_mean: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/models/stats/Ksponspeech345_비대면진료PAHA/train_mean.pt # <-- 계산 후 저장된 파일 경로
+  audio_feature_std: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/models/stats/Ksponspeech345_비대면진료PAHA/train_std.pt   # <-- 계산 후 저장된 파일 경로
   augmentation:
     noise_mixing: false
     noise_dir: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/noise_new.scp
@@ -60,8 +60,8 @@ model:
     decoder:
       decoding_method: "beamsearch"  # greedy, beamsearch
       lm_fld: /home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/lm/librispeech/librispeech-4-gram
-      beam_size: 5  # if ctc only, decoding method is greedy search (= no beam search)
-      penalty: 0.3  # < 0: 너무 짧은 출력 억제, 0.0 ~ 0.2 : 일반적인 ASR, 0.3 이상: 너무 긴 출력 억제
+      beam_size: 10  # if ctc only, decoding method is greedy search (= no beam search)
+      penalty: 0.0  # < 0: 너무 짧은 출력 억제, 0.0 ~ 0.2 : 일반적인 ASR, 0.3 이상: 너무 긴 출력 억제
       minlenratio: 0.1
       maxlenratio: 1.0 # 디코딩 출력의 최대 길이, len(encoder) * maxlenratio
       rnnlm: false

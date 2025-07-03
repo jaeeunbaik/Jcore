@@ -63,7 +63,7 @@ class Predictor(torch.nn.Module):
         """
         embedded = self.embed(y)
         embedded = self.embed_dropout(embedded)
-
+        
         if y_lengths is not None:
             y_lengths_cpu = y_lengths.to("cpu", dtype=torch.int64)
             
@@ -134,5 +134,3 @@ class Joiner(torch.nn.Module):
 
         return outputs
 
-    
-    

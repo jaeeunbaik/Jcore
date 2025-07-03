@@ -53,7 +53,7 @@ class CTC(torch.nn.Module):
             raise ValueError(
                 'ctc_type must be "builtin" or "gtnctc": {}'.format(self.ctc_type)
             )
-        self.ignore_id = -1
+        self.ignore_id = 0
         self.reduce = self.reduce
         
     def loss_fn(self, th_pred, th_target, th_ilen, th_olen) -> torch.Tensor:
