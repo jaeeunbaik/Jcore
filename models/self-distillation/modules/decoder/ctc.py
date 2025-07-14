@@ -32,35 +32,17 @@ class CTC(torch.nn.Module):
         self.dropout = torch.nn.Dropout(self.dropout_rate)
         self.probs = None
         
-        self.ctc_type = self.ctc_type if V(torch.__version__) < V("1.7.0") else "builtin"
-        
-        if self.ctc_type != self.ctc_type:
-            logging.warning(f"CTC was set to {self.ctc_type} due to PyTorch version.")
             
-        if self.ctc_type == "builtin":
-            reduction_type = "sum" if self.reduce else "none"
-            self.ctc_loss = torch.nn.CTCLoss(
-                reduction=reduction_type, zero_infinity=True
-            )
-        elif self.ctc_type == "cudnnctc":
-            reduction_type = "sum" if self.reduce else "none"
-            self.ctc_loss = torch.nn.CTCLoss(reduction=reduction_type)
-        elif self.ctc_type == "gtnctc":
-            from espnet.nets.pytorch_backend.gtn_ctc import GTNCTCLossFunction
-
-            self.ctc_loss = GTNCTCLossFunction.apply
-        else:
-            raise ValueError(
-                'ctc_type must be "builtin" or "gtnctc": {}'.format(self.ctc_type)
-            )
+        reduction_type = "sum" if self.reduce else "none"
+        self.ctc_loss = torch.nn.CTCLoss(
+            reduction=reduction_type, zero_infinity=True
+        )
+        
         self.ignore_id = -1
         self.reduce = self.reduce
         
     def loss_fn(self, th_pred, th_target, th_ilen, th_olen) -> torch.Tensor:
-        if self.ctc_type == "builtin":
-            # if th_ilen < 2 * th_olen - 1:
-            #     print(f"❌ invalid CTC condition: input {th_ilen} vs target {th_olen}")
-
+        try:
             th_pred = th_pred.log_softmax(2)
             loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen)
             size = th_pred.size(1)
@@ -71,12 +53,7 @@ class CTC(torch.nn.Module):
             else:
                 loss = loss / size
             return loss
-
-        elif self.ctc_type == "gtnctc":
-            log_probs = torch.nn.functional.log_softmax(th_pred, dim=2)
-            return self.ctc_loss(log_probs, th_target, th_ilen, 0, "none")
-
-        else:
+        except:
             raise NotImplementedError
         
     def forward(self, hs_pad, hlens, ys_pad):
@@ -89,64 +66,32 @@ class CTC(torch.nn.Module):
         :return: ctc loss value
         :rtype: torch.Tensor
         """
-        # Check CTC impossibility
-        # print(f"[DEBUG] CTC input - hs_pad: {hs_pad.shape}, hlens: {hlens.shape}, ys_pad: {ys_pad.shape}")
         ys_lens = torch.tensor([len(y[y != self.ignore_id]) for y in ys_pad], device=hlens.device)
-        invalid_mask = hlens < (2 * ys_lens - 1)
-        # if invalid_mask.any():
-        #     print("❗ CTC 조건을 만족하지 않는 샘플 있음!")
-        #     print("hlens :", hlens[invalid_mask])
-        #     print("ys_lens:", ys_lens[invalid_mask])
 
         ys = [y[y != self.ignore_id] for y in ys_pad]  # 각 샘플의 유효한 label 길이
         ys_lens = torch.tensor([len(y) for y in ys], device=hlens.device)
 
-        # ✅ CTC 조건 점검
+        # CTC 조건 점검
         invalid_mask = hlens < (2 * ys_lens - 1)
-        # if invalid_mask.any():
-        #     print("❗ CTC 조건 위반 샘플 있음")
-        #     print("    - hlens:   ", hlens[invalid_mask].tolist())
-        #     print("    - ys_lens:", ys_lens[invalid_mask].tolist())
+        if invalid_mask.any():
+            print("❗ CTC 조건 위반 샘플 있음")
+            print("    - hlens:   ", hlens[invalid_mask].tolist())
+            print("    - ys_lens:", ys_lens[invalid_mask].tolist())
 
         ys = [y[y != self.ignore_id] for y in ys_pad]
         
         # zero padding for hs
         ys_hat = self.ctc_lo(self.dropout(hs_pad))
-        if self.ctc_type != "gtnctc":
-            ys_hat = ys_hat.transpose(0, 1)
         
-        # print(f"[DEBUG] CTC logits shape: {ys_hat.shape}, min={ys_hat.min().item()}, max={ys_hat.max().item()}")
-        
-        if self.ctc_type != "builtin":
-            ys_hat = torch.clamp(ys_hat, min=-1e8, max=1e8)
-            olens = to_device(ys_hat, torch.LongTensor([len(s) for s in ys]))
-            hlens = hlens.long()
-            ys_pad = torch.cat(ys)
-            self.loss = self.loss_fn(ys_hat, ys_pad, hlens, olens)
-            if torch.isnan(loss).any():
-                print("❌ CTC Loss에서 NaN 발견! 0으로 대체합니다.")
-                loss = torch.zeros_like(loss)
-            self.loss = loss
-        else:
-            self.loss = None
-            hlens = torch.tensor(hlens, dtype=torch.int32, device=hs_pad.device)
-            olens = torch.tensor(
-                [y.size(0) for y in ys], dtype=torch.int32, device=hs_pad.device
-            )
-            # zero padding for ys
-            ys_true = torch.cat(ys).cpu().int()  # batch x olen
-            # get ctc loss
-            # expected shape of seqLength x batchSize x vocab_size
-            dtype = ys_hat.dtype
-            if self.ctc_type == "cudnnctc":
-                # use GPU when using the cuDNN implementation
-                ys_true = to_device(hs_pad, ys_true)
-            if self.ctc_type == "gtnctc":
-                # keep as list for gtn
-                ys_true = ys
-            self.loss = to_device(
-                hs_pad, self.loss_fn(ys_hat, ys_true, hlens, olens)
-            ).to(dtype=dtype)
+        ys_hat = torch.clamp(ys_hat, min=-1e8, max=1e8)
+        olens = to_device(ys_hat, torch.LongTensor([len(s) for s in ys]))
+        hlens = hlens.long()
+        ys_pad = torch.cat(ys)
+        self.loss = self.loss_fn(ys_hat, ys_pad, hlens, olens)
+        if torch.isnan(loss).any():
+            print("❌ CTC Loss에서 NaN 발견! 0으로 대체합니다.")
+            loss = torch.zeros_like(loss)
+        self.loss = loss
             
         logging.info(
             self.__class__.__name__

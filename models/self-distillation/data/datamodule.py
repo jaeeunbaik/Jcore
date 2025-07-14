@@ -16,6 +16,7 @@ class ASRDataModule(pl.LightningDataModule):
             data_config: Configuration dictionary for data loading
         """
         super(ASRDataModule, self).__init__()
+        self.distil = config.model.distillation.using_distillation
         self.data_config = config.data
         self.dataloader_config = config.dataloader
         self.train_dataset = None
@@ -45,27 +46,27 @@ class ASRDataModule(pl.LightningDataModule):
         if (stage == 'fit' or stage is None) and \
            (not isinstance(precomputed_mean_val, torch.Tensor) or precomputed_mean_val is None):
             
-            temp_train_dataset_for_stats = Dataset(self.data_config, 'train', compute_stats_only=True)
+            temp_train_dataset_for_stats = Dataset(self.distil, self.data_config, 'train', compute_stats_only=True)
             self._compute_mean_std(temp_train_dataset_for_stats)
             
             precomputed_mean_val = self.train_mean
             precomputed_std_val = self.train_std
             
         if stage == 'fit' or stage is None:
-            self.train_dataset = Dataset(self.data_config, 'train',
+            self.train_dataset = Dataset(self.distil, self.data_config, 'train',
                                          precomputed_mean=precomputed_mean_val, precomputed_std=precomputed_std_val)
-            self.val_dataset = Dataset(self.data_config, 'dev',
+            self.val_dataset = Dataset(self.distil, self.data_config, 'dev',
                                        precomputed_mean=precomputed_mean_val, precomputed_std=precomputed_std_val)
         
         if stage == 'test' or stage is None:
             if self.test_clean:
-                self.test_dataset = Dataset(self.data_config, 'testclean',
+                self.test_dataset = Dataset(self.distil, self.data_config, 'testclean',
                                             precomputed_mean=precomputed_mean_val, precomputed_std=precomputed_std_val)
             else: 
-                self.test_datset = Dataset(self.data_config, 'testother',
+                self.test_datset = Dataset(self.distil, self.data_config, 'testother',
                                            precomputed_mean=precomputed_mean_val, precomputed_std=precomputed_std_val)
         if stage == 'validate':
-            self.val_dataset = Dataset(self.data_config, 'dev')
+            self.val_dataset = Dataset(self.distil, self.data_config, 'dev')
             
             
     def _compute_mean_std(self, dataset: Dataset):

@@ -20,7 +20,7 @@ from util.utils_text import TokenProcessor
 
 
 class Dataset(Dataset):
-    def __init__(self, data_config, subset, precomputed_mean=None, precomputed_std=None, compute_stats_only=False):
+    def __init__(self, distillation, data_config, subset, precomputed_mean=None, precomputed_std=None, compute_stats_only=False):
         """
         Dataset for ASR with various augmentation options.
         
@@ -28,6 +28,7 @@ class Dataset(Dataset):
             config_path: Path to the dataset configuration file
         """
         super().__init__()
+        self.use_distil = distillation
         self.data_config = data_config
         self.subset = subset
         # Load data paths
@@ -260,41 +261,44 @@ class Dataset(Dataset):
         return len(self.items)
     
     def __getitem__(self, idx):
-        item = self.items[idx]
-        # Load audio
-        audio_path = item['audio_path']  # 오디오 파일 경로 저장
+        if self.use_distil:
+            pass
+        else:
+            item = self.items[idx]
+            # Load audio
+            audio_path = item['audio_path']  # 오디오 파일 경로 저장
 
-        # Load audio
-        waveform, sample_rate = torchaudio.load(audio_path)
+            # Load audio
+            waveform, sample_rate = torchaudio.load(audio_path)
 
-        # Resample if needed
-        if sample_rate != self.sample_rate:
-            resampler = Resample(orig_freq=sample_rate, new_freq=self.sample_rate)
-            waveform = resampler(waveform)
+            # Resample if needed
+            if sample_rate != self.sample_rate:
+                resampler = Resample(orig_freq=sample_rate, new_freq=self.sample_rate)
+                waveform = resampler(waveform)
 
-        # Apply audio-level augmentations
-        if not self.compute_stats_only:
-            if self.augmentation.get('speed_perturb', False):
-                (waveform, _) = self._apply_speed_perturbation(waveform)
+            # Apply audio-level augmentations
+            if not self.compute_stats_only:
+                if self.augmentation.get('speed_perturb', False):
+                    (waveform, _) = self._apply_speed_perturbation(waveform)
 
-            if self.augmentation.get('noise_mixing', False):
-                waveform = self._apply_noise_mixing(waveform)
-            
-            if self.augmentation.get('rir_mixing', False):
-                waveform = self._apply_rir_mixing(waveform)
+                if self.augmentation.get('noise_mixing', False):
+                    waveform = self._apply_noise_mixing(waveform)
+                
+                if self.augmentation.get('rir_mixing', False):
+                    waveform = self._apply_rir_mixing(waveform)
 
-        features = self.feature_extractor(waveform)
-        feat_len = features.shape[2]
-        # Convert to log mel spectrogram
-        features = torch.log(features + 1e-6)
+            features = self.feature_extractor(waveform)
+            feat_len = features.shape[2]
+            # Convert to log mel spectrogram
+            features = torch.log(features + 1e-6)
 
 
-        if self.mean is not None and self.std is not None:
-            mean_expanded = self.mean.unsqueeze(0).unsqueeze(2)  # (80,) -> (1, 80, 1)
-            std_expanded = self.std.unsqueeze(0).unsqueeze(2)  # (80,) -> (1, 80, 1)
-            features = (features - mean_expanded) / (std_expanded + 1e-5)
+            if self.mean is not None and self.std is not None:
+                mean_expanded = self.mean.unsqueeze(0).unsqueeze(2)  # (80,) -> (1, 80, 1)
+                std_expanded = self.std.unsqueeze(0).unsqueeze(2)  # (80,) -> (1, 80, 1)
+                features = (features - mean_expanded) / (std_expanded + 1e-5)
 
-        target = item['token']
-        target_len = len(target)
+            target = item['token']
+            target_len = len(target)
 
-        return features.squeeze(0).transpose(0, 1), feat_len, target, target_len, audio_path
+            return features.squeeze(0).transpose(0, 1), feat_len, target, target_len, audio_path

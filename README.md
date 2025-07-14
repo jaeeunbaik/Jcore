@@ -23,7 +23,7 @@ Jcore
 │   └── stats  # FILES RELATED TO FEATURE NORMALIZATION
 ├── requirements.txt
 ├── scp  # DATA IS ACCESSED WITH .scp FORMAT
-│   ├── $ SCP FOLDER
+│   ├── $ scp_folder
 │   ├── csvtoscp.py
 │   ├── extract.py
 │   └── update_scp.py

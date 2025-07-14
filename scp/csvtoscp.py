@@ -18,7 +18,7 @@ def csv_to_scp(csv_file, scp_file):
                 print(f"Skipping row with unexpected number of columns: {row}")
 
 if __name__ == "__main__":
-    csv_file_path = '/home/nas4/user/jiwon/medical_asr/medical_db_new_olkavs_vad/olkavs_tts_results.csv'  # Replace with your CSV file path
+    csv_file_path = '/home/nas4/user/jiwon/medical_asr/medical_db_new_olkavs_vad/olkavs_tts_results_eliminate.csv'  # Replace with your CSV file path
     scp_file_path ='./순천향대test/testclean.scp' # Replace with your desired SCP file path
     csv_to_scp(csv_file_path, scp_file_path)
     print(f"Successfully converted {csv_file_path} to {scp_file_path}")
