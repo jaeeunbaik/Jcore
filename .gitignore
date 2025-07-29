@@ -17,3 +17,7 @@ pymp*/
 *.csv
 models/kor-ASR-2
 models/stats
+*.code-workspace
+*.sh
+*.yaml
+models/clean-ASR-librispeech

@@ -1,7 +1,7 @@
 #!/bin/bash
 # filepath: /home/hdd2/jenny/Self-Distillation-ASR/util/spm/train.sh
 
-nbpe=3000
+nbpe=5000
 bpemode=bpe
 mkdir -p ${bpemode}
 dict=${bpemode}/kor_${bpemode}${nbpe}_units.txt

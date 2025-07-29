@@ -98,7 +98,7 @@ class e2eASR(nn.Module):
             self.ctc = CTC(self.decoder_config)
             self.ctc_weight = 0.0
 
-        self.rnnlm = None
+        self.lm = None
         self.kenlm_path = None
         if self.decoder_config.lm is not None and self.decoder_config.lm.endswith('.arpa'):
             self.kenlm_path = self.decoder_config.lm
@@ -354,14 +354,13 @@ class e2eASR(nn.Module):
                                            self.decoder_config.beam_size, 
                                            self.blank, 
                                            current_device, 
-                                           lm=lm, 
+                                           lm=self.lm, 
                                            lm_weight=self.decoder_config.lm_weight)
                 else:
                     raise ValueError(f'Unsupported decoding method: {self.decoder_config.decoding_method}')
                 
                 decoded_text = sp.decode(hyp).replace(" ", " ").strip()
                 hyps.append(decoded_text.split()) # 단어 단위로 분리하여 List[List[str]] 유지
-            # 결과 반환
             if self.decoder_config.decoding_method == 'greedy_search':
                 return {'greedy_search': hyps}
             

@@ -3,15 +3,15 @@ dataloader:
   num_workers: 4
   pin_memory: True
 data:
-  scp_dir: /home/hdd2/jenny/ASRToolkit/Jcore/scp/kspon_aihub비대면/
+  scp_dir: /home/hdd2/jenny/ASRToolkit/Jcore/scp/순천향대test/
   sample_rate: 16000
   n_mels: 80
   n_fft: 400
   win_length: 400
   hop_length: 160
   test_clean: True
-  audio_feature_mean: /home/hdd2/jenny/ASRToolkit/Jcore/models/stats/Ksponspeechall_비대면진료PAPBPCHAHB/train_mean.pt  # <-- 계산 후 저장된 파일 경로
-  audio_feature_std: /home/hdd2/jenny/ASRToolkit/Jcore/models/stats/Ksponspeechall_비대면진료PAPBPCHAHB/train_std.pt   # <-- 계산 후 저장된 파일 경로
+  audio_feature_mean: /home/hdd2/jenny/ASRToolkit/Jcore/models/stats/Ksponspeech1234_비대면진료PAPBHA/train_mean.pt  # <-- 계산 후 저장된 파일 경로
+  audio_feature_std: /home/hdd2/jenny/ASRToolkit/Jcore/models/stats/Ksponspeech1234_비대면진료PAPBHA/train_std.pt  # <-- 계산 후 저장된 파일 경로
   augmentation:
     noise_mixing: false
     noise_dir: /home/hdd2/jenny/ASRToolkit/Jcore/scp/noise_new.scp
@@ -23,20 +23,20 @@ data:
     rir_prob: 0.3
     RT_list: [0.3, 0.5, 0.7]
 
-    specaugment: true
+    specaugment: false
     time_mask_param: 100
     freq_mask_param: 27
     n_time_masks: 2
     n_freq_masks: 2
   
-    speed_perturb: true
+    speed_perturb: false
     speed_factors: [0.9, 1.0, 1.1]  # 0.9가 33%로 적용, 1.0이 33%로 적용, 1.1이 33%로 적용
     speed_prob: 0.8
 
     gaussian_noise: false
     gnoise_prob: 0.5
     gnoise_std: 0.1
-  tokenizer: /home/hdd2/jenny/ASRToolkit/Jcore/util/spm/bpe/kor_bpe5000.model
+  tokenizer: /home/hdd2/jenny/ASRToolkit/Jcore/scp/kspon1234_aihub비대면PAPBHA/kor_bpe5000.model
 model:
   asr:
     encoder:
@@ -59,15 +59,13 @@ model:
       half_step_residual: True
     decoder:
       decoding_method: "beamsearch"  # greedy, beamsearch
-      beam_size: 10  # if ctc only, decoding method is greedy search (= no beam search)
+      beam_size: 5 
       penalty: 0.3  # < 0: 너무 짧은 출력 억제, 0.0 ~ 0.2 : 일반적인 ASR, 0.3 이상: 너무 긴 출력 억제
       minlenratio: 0.1
       maxlenratio: 1.0 # 디코딩 출력의 최대 길이, len(encoder) * maxlenratio
-      rnnlm: false
-      lm: /home/hdd2/jenny/ASRToolkit/Jcore/lm/kenlm/my_kenlm.arpa
+      lm: 
       lm_weight: 0.2
       type: "rnnt"  # ctc, rnnt, transformer, hybrid
-      ctc_type: "builtin"  # builtin, cudnnctc, gtnctc
       ctc_weight: 0.0
       eprojs: 256      
       odim: 5000
@@ -93,12 +91,12 @@ model:
 
 trainer:
   proj: "Ksponspeech + AIHub_비대면진료담화"
-  exp_name: "rnnt decoder"
+  exp_name: "test"
   log_dir: "logs"
   num_epochs: 100
   weight_decay: 1e-6
   warmup_epochs: 10
-  precision: 16
+  precision: bf16
   accumulate_grad_batches: 32  # 64 로 고정 ! effecitive batch size = batch size * accumulate_grad_batches, effective in warmup and wandb
   gpus: 1
   gradient_clip_val: 1.0
@@ -107,14 +105,14 @@ trainer:
   val_check_interval: 1.0
   strategy: "ddp"  # ddp, ddp_spawn, deepspeed
   reload_dataloaders_every_n_epochs: 5
-  ckpt_path: /home/hdd2/jenny/ASRToolkit/Jcore/models/kor-ASR-2/models/epoch=00-val_cer=0.436.ckpt
+  save_top_k: -1  # all models are saved
+  ckpt_path: /home/hdd2/jenny/ASRToolkit/Jcore/models/kor-ASR-2/models/epoch=17-val_wer=0.0000.ckpt
 checkpoint:
   checkpoint_monitor: "val_loss"
-  save_top_k: -1  # all models are saved
   model_save_path: "/home/hdd2/jenny/ASRToolkit/Jcore/models/kor-ASR-2/models/clean_ASR.pth"
 optimizer:
   type: "AdamW"
-  k_value: 1.13  # max : 1e-3
+  op_lr: 1.13  # max : 1e-3
   max_epochs: 100
   warmup_steps: 5000
   scheduling_type: "lambda"  # cosine-annealing, warmup, lambda

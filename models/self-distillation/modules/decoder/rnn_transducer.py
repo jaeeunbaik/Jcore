@@ -20,7 +20,7 @@ class Predictor(torch.nn.Module):
                  embed_dim=256,
                  hidden_dim=640,
                  output_dim=256,
-                 num_embeddings=5000,
+                 num_embeddings=3000,
                  layer_type='lstm',
                  embed_dropout_rate=0.1,
                  rnn_dropout_rate=0.1):
@@ -63,7 +63,6 @@ class Predictor(torch.nn.Module):
         """
         embedded = self.embed(y)
         embedded = self.embed_dropout(embedded)
-        
         if y_lengths is not None:
             y_lengths_cpu = y_lengths.to("cpu", dtype=torch.int64)
             
@@ -103,7 +102,7 @@ class Joiner(torch.nn.Module):
     def __init__(self, input_dim, output_dim):
         super(Joiner, self).__init__()
         self.input_dim = input_dim  # 256
-        self.output_dim = output_dim  # 2000
+        self.output_dim = output_dim 
         # self.output_linear = nn.Linear(self.input_dim, self.output_dim)
         self.fc = nn.Sequential(
             nn.Linear(input_dim << 1, input_dim),

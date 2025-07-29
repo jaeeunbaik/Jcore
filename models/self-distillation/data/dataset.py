@@ -16,11 +16,14 @@ from torchaudio.transforms import MelSpectrogram, Resample, SpeedPerturbation
 from torchaudio.transforms import TimeMasking, FrequencyMasking
 from typing import Dict, List, Optional, Tuple
 
+# nnAudio 임포트 (올바른 이름으로 수정)
+from nnAudio.features import Gammatonegram
+
 from util.utils_text import TokenProcessor
 
 
 class Dataset(Dataset):
-    def __init__(self, distillation, data_config, subset, precomputed_mean=None, precomputed_std=None, compute_stats_only=False):
+    def __init__(self, data_config, subset, precomputed_mean=None, precomputed_std=None, compute_stats_only=False):
         """
         Dataset for ASR with various augmentation options.
         
@@ -28,10 +31,8 @@ class Dataset(Dataset):
             config_path: Path to the dataset configuration file
         """
         super().__init__()
-        self.use_distil = distillation
         self.data_config = data_config
         self.subset = subset
-        # Load data paths
         self.scp_path = self.data_config.scp_dir + f"{subset}_token.scp"
         self.items = self._load_scp(self.scp_path)
         
@@ -41,264 +42,157 @@ class Dataset(Dataset):
         self.win_length = self.data_config.win_length
         self.hop_length = self.data_config.hop_length
         
-        # Token processor
         self.token_processor = TokenProcessor(self.data_config.tokenizer)
         
-        # Feature extractor
-        self.feature_extractor = MelSpectrogram(
-            sample_rate=self.sample_rate,
-            n_fft=self.n_fft,
-            win_length=self.win_length,
-            hop_length=self.hop_length,
-            n_mels=self.n_mels
-        )
+        feature_type = self.data_config.get('feature_type', 'mel')
+        if feature_type == 'gammatone':
+            self.feature_extractor = Gammatonegram(sr=self.sample_rate, n_fft=self.n_fft, hop_length=self.hop_length, n_bins=self.n_mels, window='hann', power=2, fmin=20, fmax=self.sample_rate // 2)
+        elif feature_type == 'mel':
+            self.feature_extractor = MelSpectrogram(sample_rate=self.sample_rate, n_fft=self.n_fft, win_length=self.win_length, hop_length=self.hop_length, n_mels=self.n_mels)
+        else:
+            raise ValueError(f"Unsupported feature_type: {feature_type}")
         
-        self.augmentation = self.data_config.augmentation
         self.compute_stats_only = compute_stats_only
         if not self.compute_stats_only:
-            self._init_augmentations()
-        else: 
-            self.noise_paths = None
-            self.rir_data = None
-            self.speed_perturbation = None 
+            self.student_aug_config = self.data_config.get('student_augmentation')
+            self.teacher_aug_config = self.data_config.get('teacher_augmentation')
+            self._init_resources()
+
+        self.normalization_enabled = self.data_config.get('normalization', {}).get('enabled', False)
         self.mean = None
         self.std = None
-        if precomputed_mean is not None and precomputed_std is not None:
-            self.mean = torch.tensor(precomputed_mean, dtype=torch.float32)
-            self.std = torch.tensor(precomputed_std, dtype=torch.float32)
-        
-        
-    def _init_augmentations(self):
-        """Initialize augmentation methods based on config"""
-        # Noise mixing augmentation
-        if self.augmentation.noise_mixing:
-            self.noise_paths = self._load_noise_files(self.augmentation.noise_dir)
-            self.noise_prob = self.augmentation.noise_prob
-            self.noise_level = self.augmentation.noise_level
-        else:
-            self.noise_paths = None
-            
-        # RIR mixing augmentation
-        if self.augmentation.rir_mixing:
-            self.rir_dir = self.augmentation.rir_dir
-            self.rir_prob = self.augmentation.rir_prob
-            self.RT_list = self.augmentation.RT_list
-            self.rir_data = self._load_rir_data(self.rir_dir, self.RT_list)
-        else:
-            self.rir_data = None
-            
-        # SpecAugment
-        if self.augmentation.specaugment:
-            self.time_mask_param = self.augmentation.time_mask_param
-            self.freq_mask_param = self.augmentation.freq_mask_param
-            self.n_time_masks = self.augmentation.n_time_masks
-            self.n_freq_masks = self.augmentation.n_freq_masks
-            
-            self.time_masking = TimeMasking(time_mask_param=self.time_mask_param, p=1.0)
-            self.freq_masking = FrequencyMasking(freq_mask_param=self.freq_mask_param)
-        
-        # Speed perturbation
-        if self.augmentation.speed_perturb:
-            self.speed_factors = self.augmentation.speed_factors
-            self.speed_prob = self.augmentation.speed_prob
-            self.speed_perturbation = SpeedPerturbation(self.sample_rate, self.speed_factors)
-    
-        # if self.augmentation.gaussian_noise:
-        #     self.gaussian_noise_prob = self.augmentation.gnoise_prob
-        #     self.gaussian_noise_std = self.augmentation.gnoise_std
-        
+        if self.normalization_enabled:
+            self.mean = torch.tensor(precomputed_mean, dtype=torch.float32) if precomputed_mean is not None else None
+            self.std = torch.tensor(precomputed_std, dtype=torch.float32) if precomputed_std is not None else None
+
+    def _init_resources(self):
+        """Initialize shared resources for augmentation like noise and RIR files."""
+        self.noise_paths = None
+        self.rir_data = None
+
+        # Load resources if they are defined in either student or teacher config
+        student_noise = self.student_aug_config and self.student_aug_config.get('noise_mixing')
+        teacher_noise = self.teacher_aug_config and self.teacher_aug_config.get('noise_mixing')
+        if student_noise or teacher_noise:
+            # Assume student config holds the path
+            noise_dir = self.student_aug_config.noise_dir if student_noise else self.teacher_aug_config.noise_dir
+            self.noise_paths = self._load_noise_files(noise_dir)
+
+        student_rir = self.student_aug_config and self.student_aug_config.get('rir_mixing')
+        teacher_rir = self.teacher_aug_config and self.teacher_aug_config.get('rir_mixing')
+        if student_rir or teacher_rir:
+            # Assume student config holds the path and params
+            if student_rir:
+                self.rir_data = self._load_rir_data(self.student_aug_config.rir_dir, self.student_aug_config.RT_list)
+            else:
+                self.rir_data = self._load_rir_data(self.teacher_aug_config.rir_dir, self.teacher_aug_config.RT_list)
+
     def _load_scp(self, scp_path):
-        """Load dataset manifest file"""
         items = []
         with open(scp_path, 'r', encoding='utf-8') as f:
             for line in f:
-                item = line.strip().split('|')
-                if len(item) >= 2:
-                    audio_path = item[0]
-                    token = item[1]
-                    token_tensors = torch.tensor(list(map(int, token.split(' '))))
-                    items.append({
-                        'audio_path': audio_path,
-                        'token': token_tensors
-                    })
+                parts = line.strip().split('|')
+                if len(parts) >= 2:
+                    items.append({'audio_path': parts[0], 'token': torch.tensor(list(map(int, parts[1].split())))})
         return items
-    
-    def _load_noise_files(self, noise_scp):
-        """Load noise files for augmentation"""
-        noise_files = []
-        # if noise_dir and os.path.exists(noise_dir):
-        #     for file in os.listdir(noise_dir):
-        #         if file.endswith(('.wav', '.flac', '.mp3')):
-        #             noise_files.append(os.path.join(noise_dir, file))
-        with open(noise_scp, '+r') as f:
-            for line in f.readlines():
-                noise_files.append(line.split('\n')[0])
-        return noise_files
 
-    
+    def _load_noise_files(self, noise_scp):
+        with open(noise_scp, 'r') as f:
+            return [line.strip() for line in f]
+
     def _load_rir_data(self, rir_path, RT_list):
-        """
-        Load Room Impulse Response data from file
-        
-        Args:
-            rir_path: Path to RIR scp file
-            RT_list: List of RT60 values
-            
-        Returns:
-            List of loaded RIR files
-        """
         try:
             with open(rir_path, 'r') as f:
-                rir_list = [line.strip() for line in f.readlines()]
+                rir_list = [line.strip() for line in f]
+            if not rir_list: return None
             
-            if not rir_list:
-                print("Warning: No RIR files found in", rir_path)
-                return None
-                
             rir_data = []
             for file in rir_list:
                 if os.path.exists(file):
-                    RIR, sr = librosa.load(file, sr=self.sample_rate, mono=True)
-                    RIR = RIR / np.sqrt(np.sum(RIR**2) + 1e-9)
-                    rir_data.append(RIR)
-                else:
-                    print(f"Warning: RIR file not found: {file}")
-                    
+                    RIR, _ = librosa.load(file, sr=self.sample_rate, mono=True)
+                    rir_data.append(RIR / np.sqrt(np.sum(RIR**2) + 1e-9))
             return rir_data if rir_data else None
-            
         except Exception as e:
             print(f"Error loading RIR data: {e}")
             return None
+
     
-    def _apply_gaussian_noise(self, features: torch.Tensor) -> torch.Tensor:
-        if self.gaussian_noise_prob > 0 and random.random() < self.gaussian_noise_prob:
-            noise = torch.randn_like(features) * self.gaussian_noise_std
-            features = features + noise
-        return features
-    
-    def _apply_noise_mixing(self, waveform):
-        """Add background noise to the audio"""
-        if self.noise_paths and random.random() < self.noise_prob:
+    def _apply_noise_mixing(self, waveform, aug_config):
+        if aug_config and aug_config.get('noise_mixing') and self.noise_paths and random.random() < aug_config.noise_prob:
             noise_path = random.choice(self.noise_paths)
             noise, noise_sr = torchaudio.load(noise_path)
-            
             if noise_sr != self.sample_rate:
-                resampler = Resample(orig_freq=noise_sr, new_freq=self.sample_rate)
-                noise = resampler(noise)
+                noise = Resample(orig_freq=noise_sr, new_freq=self.sample_rate)(noise)
             
             if noise.shape[1] < waveform.shape[1]:
-                factor = int(np.ceil(waveform.shape[1] / noise.shape[1]))
-                noise = noise.repeat(1, factor)[:, :waveform.shape[1]]
-            else:
-                noise = noise[:, :waveform.shape[1]]
+                noise = noise.repeat(1, int(np.ceil(waveform.shape[1] / noise.shape[1])))
+            noise = noise[:, :waveform.shape[1]]
             
-            noise_level = random.uniform(0, self.noise_level)
-            waveform = (1 - noise_level) * waveform + noise_level * noise
-        return waveform
-    
-    def _apply_rir_mixing(self, waveform):
-        # waveform: [channels, T] tensor (e.g., [1, T])
-        if self.rir_data and random.random() < self.rir_prob:
-            rir_np = random.choice(self.rir_data) 
-            rir_tensor = torch.from_numpy(rir_np).to(waveform.dtype) 
-
-            if len(rir_tensor.shape) > 1:
-                rir_tensor = rir_tensor.flatten()
-            
-            rir_tensor = rir_tensor.unsqueeze(0) 
-
-
-            try:
-                reverberated = torchaudio.functional.convolve(waveform, rir_tensor, mode='full')
-                
-                start_idx = (reverberated.shape[-1] - waveform.shape[-1]) // 2
-                reverberated = reverberated[:, start_idx : start_idx + waveform.shape[-1]]
-            except AttributeError: 
-                waveform_np = waveform.numpy()
-                if len(rir_np.shape) > 1:
-                    rir_np = rir_np.flatten()
-                
-                temp = ss.convolve(waveform_np[0], rir_np, mode='full') 
-
-                start_idx_np = (temp.shape[-1] - waveform_np.shape[-1]) // 2
-                temp = temp[start_idx_np : start_idx_np + waveform_np.shape[-1]]
-
-                if np.max(np.abs(temp)) > 1e-6:
-                    temp = temp / np.max(np.abs(temp)) * np.max(np.abs(waveform_np))
-                
-                reverberated = torch.from_numpy(np.expand_dims(temp, axis=0)).to(waveform.dtype) 
-
-            if reverberated.abs().max() > 1e-6: 
-                reverberated = reverberated / reverberated.abs().max() * waveform.abs().max()
-
-            return reverberated
-
+            noise_level = random.uniform(*aug_config.noise_level)
+            return (1 - noise_level) * waveform + noise_level * noise
         return waveform
 
-          
-    def _apply_specaugment(self, spec):
-        """Apply SpecAugment to the spectrogram"""
-        if hasattr(self, 'time_masking'):
-            # Apply time masking
-            for _ in range(self.n_time_masks):
-                spec = self.time_masking(spec)
-            
-            # Apply frequency masking
-            for _ in range(self.n_freq_masks):
-                spec = self.freq_masking(spec)
-                
-        return spec
-    
-    def _apply_speed_perturbation(self, waveform):
-        """Apply speed perturbation to the audio"""
-        new_len = None
-        if hasattr(self, 'speed_perturbation') and random.random() < self.speed_prob:
-            length = torch.tensor([waveform.shape[-1]], dtype=torch.float32)
-            waveform, new_len = self.speed_perturbation(waveform, length)
-        return waveform, new_len
-    
+    def _apply_rir_mixing(self, waveform, aug_config):
+        if aug_config and aug_config.get('rir_mixing') and self.rir_data and random.random() < aug_config.rir_prob:
+            rir_np = random.choice(self.rir_data)
+            rir_tensor = torch.from_numpy(rir_np).float().unsqueeze(0)
+            reverberated = F.conv1d(waveform.unsqueeze(0), rir_tensor, padding='same')
+            return reverberated.squeeze(0)
+        return waveform
+
+    def _apply_specaugment(self, features, aug_config):
+        if aug_config and aug_config.get('specaugment'):
+            time_masking = TimeMasking(time_mask_param=aug_config.time_mask_param, p=1.0)
+            freq_masking = FrequencyMasking(freq_mask_param=aug_config.freq_mask_param)
+            for _ in range(aug_config.n_time_masks):
+                features = time_masking(features)
+            for _ in range(aug_config.n_freq_masks):
+                features = freq_masking(features)
+        return features
+
     def __len__(self):
         return len(self.items)
-    
+
     def __getitem__(self, idx):
-        if self.use_distil:
-            pass
-        else:
-            item = self.items[idx]
-            # Load audio
-            audio_path = item['audio_path']  # 오디오 파일 경로 저장
-
-            # Load audio
+        item = self.items[idx]
+        audio_path = item['audio_path']
+        
+        try:
             waveform, sample_rate = torchaudio.load(audio_path)
+        except Exception as e:
+            logging.error(f"Error loading audio file {audio_path}: {e}")
+            # Return a dummy item or skip
+            return self.__getitem__((idx + 1) % len(self))
 
-            # Resample if needed
-            if sample_rate != self.sample_rate:
-                resampler = Resample(orig_freq=sample_rate, new_freq=self.sample_rate)
-                waveform = resampler(waveform)
+        if sample_rate != self.sample_rate:
+            waveform = Resample(orig_freq=sample_rate, new_freq=self.sample_rate)(waveform)
 
-            # Apply audio-level augmentations
-            if not self.compute_stats_only:
-                if self.augmentation.get('speed_perturb', False):
-                    (waveform, _) = self._apply_speed_perturbation(waveform)
+        # --- Create Student and Teacher Features ---
+        student_features, feat_len = self._get_augmented_features(waveform.clone(), self.student_aug_config)
+        teacher_features, _ = self._get_augmented_features(waveform.clone(), self.teacher_aug_config)
+        
+        target = item['token']
+        target_len = len(target)
 
-                if self.augmentation.get('noise_mixing', False):
-                    waveform = self._apply_noise_mixing(waveform)
-                
-                if self.augmentation.get('rir_mixing', False):
-                    waveform = self._apply_rir_mixing(waveform)
+        return student_features, teacher_features, feat_len, target, target_len, audio_path
 
-            features = self.feature_extractor(waveform)
-            feat_len = features.shape[2]
-            # Convert to log mel spectrogram
-            features = torch.log(features + 1e-6)
+    def _get_augmented_features(self, waveform, aug_config):
+        # Apply waveform-level augmentations
+        if not self.compute_stats_only:
+            waveform = self._apply_noise_mixing(waveform, aug_config)
+            waveform = self._apply_rir_mixing(waveform, aug_config)
 
+        # Extract features
+        features = self.feature_extractor(waveform)
+        feat_len = features.shape[2]
+        features = torch.log(features + 1e-6)
 
-            if self.mean is not None and self.std is not None:
-                mean_expanded = self.mean.unsqueeze(0).unsqueeze(2)  # (80,) -> (1, 80, 1)
-                std_expanded = self.std.unsqueeze(0).unsqueeze(2)  # (80,) -> (1, 80, 1)
-                features = (features - mean_expanded) / (std_expanded + 1e-5)
+        # Normalize if enabled
+        if self.normalization_enabled and self.mean is not None and self.std is not None:
+            features = (features - self.mean.unsqueeze(0).unsqueeze(2)) / (self.std.unsqueeze(0).unsqueeze(2) + 1e-5)
 
-            target = item['token']
-            target_len = len(target)
-
-            return features.squeeze(0).transpose(0, 1), feat_len, target, target_len, audio_path
+        # Apply feature-level augmentations
+        if not self.compute_stats_only:
+            features = self._apply_specaugment(features, aug_config)
+            
+        return features.squeeze(0).transpose(0, 1), feat_len

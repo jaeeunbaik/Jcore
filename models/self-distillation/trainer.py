@@ -14,7 +14,6 @@ from data.datamodule import ASRDataModule
 from attrdict import AttrDict
 
 
-torch.backends.cudnn.benchmark = True
 
 class Trainer:
     def __init__(self, config):
@@ -40,6 +39,8 @@ class Trainer:
         
         # Setup callbacks
         callbacks = self._setup_callbacks()
+        
+        # DDP 설정 최적화
         strategy = DDPStrategy(find_unused_parameters=False)
         # Initialize PyTorch Lightning trainer
         trainer_kwargs = {
@@ -57,7 +58,10 @@ class Trainer:
             'reload_dataloaders_every_n_epochs': config.trainer.reload_dataloaders_every_n_epochs
         }
 
-        self.trainer = PLTrainer(**trainer_kwargs)
+        self.trainer = PLTrainer(**trainer_kwargs,
+        num_sanity_val_steps=0,
+        limit_train_batches=1.0,        #  전체 대비 비율로 디버그
+        limit_val_batches=0.1)
 
     def _setup_callbacks(self):
         """Setup training callbacks"""
@@ -67,9 +71,10 @@ class Trainer:
         callbacks.append(
             ModelCheckpoint(
                 dirpath=checkpoint_path,
-                filename='{epoch:02d}-{val_wer:.4f}',
-                monitor='val_wer_epoch',
-                save_top_k=self.config.checkpoint.save_top_k,
+                filename='{step:02d}-{val_cer:.4f}',
+                every_n_train_steps=5000,
+                monitor='val_cer_epoch',
+                save_top_k=-1,
                 mode='min',
                 save_last=True
             )
@@ -149,6 +154,7 @@ class Trainer:
 
 def main():
     """Main function for running the trainer from command line"""
+    print("ENV:", {k:os.environ[k] for k in ["CUDA_VISIBLE_DEVICES","LOCAL_RANK","RANK","WORLD_SIZE"] if k in os.environ})
     parser = argparse.ArgumentParser(description="ASR Training Script")
     parser.add_argument('--config', type=str, required=True, help='Path to configuration YAML file')
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'validate', 'test', 'train_test'],

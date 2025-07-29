@@ -67,8 +67,8 @@ def extract_and_convert_tokens_to_text(scp_path: str, sp_model_path: str, output
     print(f"Processed tokens from {scp_path} and saved to {output_txt_path}")
 
 if __name__ == "__main__":
-    scp_file = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/scp/kspon_aihub비대면/train.scp'
+    scp_file = '/home/hdd2/jenny/ASRToolkit/Jcore/scp/kspon1234_aihub비대면PAPBHA/train.scp'
     sp_model = '/home/hdd2/jenny/ASRToolkit/Self-Distillation-ASR/util/spm/bpe/kor_bpe5000.model'
-    output_file = 'input.txt'
+    output_file = '/home/hdd2/jenny/ASRToolkit/Jcore/scp/kspon1234_aihub비대면PAPBHA/input.txt'
 
     extract_and_convert_tokens_to_text(scp_file, sp_model, output_file)

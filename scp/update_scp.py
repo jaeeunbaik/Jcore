@@ -203,13 +203,13 @@ if __name__ == "__main__":
     
     # 2. 새로 생성될 train.scp 파일의 경로를 여기에 입력하세요.
     update_scp_file = '/home/hdd2/jenny/ASRToolkit/Jcore/scp/AIHub_비대면진료/train_new.scp' 
-    output_scp_file = '/home/hdd2/jenny/ASRToolkit/Jcore/scp/순천향대test/testclean.scp'
-    out_scp_file = '/home/hdd2/jenny/ASRToolkit/Jcore/scp/순천향대test/testclean_token.scp'
+    output_scp_file = '/home/hdd2/jenny/ASRToolkit/Jcore/scp/kspon1234_aihub비대면PAPBHA/testclean.scp'
+    out_scp_file = '/home/hdd2/jenny/ASRToolkit/Jcore/scp/kspon1234_aihub비대면PAPBHA/testclean_token.scp'
     # 3. 새로운 데이터셋 기본 경로를 여기에 입력하세요.
     new_base_directory = '/home/hdd1/jenny/AIHub_비대면진료'
 
     # 4. 학습된 SentencePiece 모델 파일 (.model)의 경로를 여기에 입력하세요.
-    spm_model_file = '/home/hdd2/jenny/ASRToolkit/Jcore/util/spm/bpe/kor_bpe3000.model' 
+    spm_model_file = '/home/hdd2/jenny/ASRToolkit/Jcore/scp/kspon1234_aihub비대면PAPBHA/kor_bpe5000.model' 
 
 
     print(f"'{original_scp_file}' 파일을 처리하여 토큰화된 '{output_scp_file}'을 생성합니다...")

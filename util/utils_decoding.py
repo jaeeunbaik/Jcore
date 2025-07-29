@@ -140,6 +140,7 @@ class TransducerHypothesis:
     # Optional decoder state. We assume it is LSTM for now,
     # so the state is a tuple (h, c)
     decoder_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    
 def rnnt_beam_search(
     ylens, 
     predictor, 
@@ -182,17 +183,27 @@ def rnnt_beam_search(
         hidden_size = predictor.hidden_dim
 
         predictor_input_states = None
+        
         if beams[0]["predictor_states"] is not None: 
             if is_lstm: # LSTM인 경우 (h, c) 튜플 상태
-                h_states_to_concat = [b["predictor_states"][0] for b in beams]
-                c_states_to_concat = [b["predictor_states"][1] for b in beams]
+                h_states_to_concat = [
+                    b["predictor_states"][0] if b["predictor_states"] is not None else torch.zeros_like(beams[0]["predictor_states"][0])
+                    for b in beams
+                ]
+                c_states_to_concat = [
+                    b["predictor_states"][1] if b["predictor_states"] is not None else torch.zeros_like(beams[0]["predictor_states"][1])
+                    for b in beams
+                ]
                 predictor_input_states = (torch.cat(h_states_to_concat, dim=1), torch.cat(c_states_to_concat, dim=1))
             elif is_gru: # GRU인 경우 단일 h 텐서 상태
-                h_states_to_concat = [b["predictor_states"] for b in beams]
+                h_states_to_concat = [
+                    b["predictor_states"] if b["predictor_states"] is not None else torch.zeros_like(beams[0]["predictor_states"])
+                    for b in beams
+                ]
                 predictor_input_states = torch.cat(h_states_to_concat, dim=1)
             else:
                 raise TypeError(f"Unsupported RNN type in Predictor: {type(predictor.rnn)}")
-            
+        
         pred_out_batch, new_predictor_states_batch = predictor(
             y=current_tokens_batch, 
             y_lengths=torch.ones(current_tokens_batch.size(0), dtype=torch.long, device=device), 

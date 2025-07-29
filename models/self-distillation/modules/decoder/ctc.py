@@ -56,53 +56,57 @@ class CTC(torch.nn.Module):
         except:
             raise NotImplementedError
         
-    def forward(self, hs_pad, hlens, ys_pad):
+    def forward(self, hs_pad, hlens, ys_pad):  # hs_pad: encoder output, ys_pad: targets
         """CTC forward
 
         :param torch.Tensor hs_pad: batch of padded hidden state sequences (B, Tmax, D)
-        :param torch.Tensor hlens: batch of lengths of hidden state sequeces (B)
+        :param torch.Tensor hlens: batch of lengths of hidden state sequences (B)
         :param torch.Tensor ys_pad:
             batch of padded character id sequence tensor (B, Lmax)
         :return: ctc loss value
         :rtype: torch.Tensor
         """
-        ys_lens = torch.tensor([len(y[y != self.ignore_id]) for y in ys_pad], device=hlens.device)
 
-        ys = [y[y != self.ignore_id] for y in ys_pad]  # 각 샘플의 유효한 label 길이
-        ys_lens = torch.tensor([len(y) for y in ys], device=hlens.device)
-
-        # CTC 조건 점검
+        ys_lens_list = []
+        for y_seq in ys_pad:
+            # ignore_id가 아닌 실제 레이블만 카운트
+            ys_lens_list.append((y_seq != self.ignore_id).sum().item())
+        ys_lens = torch.tensor(ys_lens_list, dtype=torch.long, device=hlens.device)
+        
         invalid_mask = hlens < (2 * ys_lens - 1)
         if invalid_mask.any():
-            print("❗ CTC 조건 위반 샘플 있음")
-            print("    - hlens:   ", hlens[invalid_mask].tolist())
-            print("    - ys_lens:", ys_lens[invalid_mask].tolist())
+            logging.warning("❗ CTC 조건 위반 샘플 있음")
+            logging.warning(f"     - hlens:   {hlens[invalid_mask].tolist()}")
+            logging.warning(f"     - ys_lens: {ys_lens[invalid_mask].tolist()}")
+            # CTC 조건 위반 샘플에 대한 처리가 필요할 수 있습니다.
+            # zero_infinity=True 설정 시 이런 경우 loss가 0이 됩니다.
 
-        ys = [y[y != self.ignore_id] for y in ys_pad]
-        
-        # zero padding for hs
-        ys_hat = self.ctc_lo(self.dropout(hs_pad))
-        
-        ys_hat = torch.clamp(ys_hat, min=-1e8, max=1e8)
-        olens = to_device(ys_hat, torch.LongTensor([len(s) for s in ys]))
-        hlens = hlens.long()
-        ys_pad = torch.cat(ys)
-        self.loss = self.loss_fn(ys_hat, ys_pad, hlens, olens)
+        ys_hat = self.ctc_lo(self.dropout(hs_pad)).permute(1, 0, 2) # (Tmax, B, C)
+        ys_hat = torch.clamp(ys_hat, min=-1e8, max=1e8) 
+
+        targets_1d = torch.cat([y_seq[y_seq != self.ignore_id] for y_seq in ys_pad])
+
+        loss = self.loss_fn(ys_hat, targets_1d, hlens, ys_lens) # 여기서 ys_lens가 사용됨!
+
         if torch.isnan(loss).any():
-            print("❌ CTC Loss에서 NaN 발견! 0으로 대체합니다.")
+            logging.warning("❌ CTC Loss에서 NaN 발견! 0으로 대체합니다.")
             loss = torch.zeros_like(loss)
-        self.loss = loss
-            
+        
+        self.loss = loss # 인스턴스 변수에 손실 값 저장
+
         logging.info(
-            self.__class__.__name__
-            + " output lengths: "
-            + "".join(str(olens).split("\n"))
+            f"{self.__class__.__name__} "
+            f"output lengths: {ys_lens.tolist()} " # ys_lens를 로깅
+            f"input lengths: {hlens.tolist()}"
         )
         
-        if self.reduce:
+        # 6. 최종 손실 리덕션
+        if self.reduce and self.loss_fn.reduction == 'none': # loss_fn의 reduction이 'none'일 때만 sum
             self.loss = self.loss.sum()
-            logging.info("ctc loss:" + str(float(self.loss)))
-            
+            logging.info(f"ctc loss (summed): {float(self.loss)}")
+        elif self.loss_fn.reduction != 'none': # reduction이 이미 적용된 경우
+            logging.info(f"ctc loss (reduced by CTCLoss): {float(self.loss)}")
+
         return self.loss
     
     

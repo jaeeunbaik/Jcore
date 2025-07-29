@@ -20,6 +20,17 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 
 class ModelModule(pl.LightningModule):
+    def on_train_epoch_start(self):
+        if self.current_epoch >= 2:
+            datamodule = getattr(self.trainer, 'datamodule', None)
+            if datamodule is not None and hasattr(datamodule, 'train_dataset'):
+                train_dataset = getattr(datamodule, 'train_dataset')
+                aug = getattr(train_dataset, 'augmentation', None)
+                if aug is not None:
+                    aug.noise_mixing = True
+                    logging.info(f"[Augmentation] Noise mixing enabled at epoch {self.current_epoch}")
+
+
     def __init__(self, config):
         super().__init__()
         self.model_config = config.model.asr
@@ -43,26 +54,25 @@ class ModelModule(pl.LightningModule):
             report_cer=self.model_config.report_cer,
             report_wer=self.model_config.report_wer
         )
-      
+        self.val_cer_sum = 0
+        self.val_cer_count = 0
+        self.csv_file = 'test_result.csv'
+        self.csv_writer = None
+        self.csv_file = None
 
     
     def training_step(self, batch, batch_idx):
         x, x_len, y, y_len, _ = batch
+        
         if self.use_kd:
             loss_dict = self.model(x, x_len, y, y_len)
             self.log("train/total_loss", loss_dict["total_loss"])
-            self.log("train/kd_loss", loss_dict["kd_loss"])
-            self.log("train/asr_loss", loss_dict["student_loss"])
             return loss_dict["total_loss"]
         else:
             loss = self.model(x, x_len, y, y_len)
             log_items = {
-                "train/total_loss": loss.get("loss"),
-                "train/cer": loss.get("cer"),
-                "train/wer": loss.get("wer"),
-            }
-            
-            # None이 아닌 값만 log로 넘김
+                "train/total_loss": loss.get("loss")
+            }            
             for key, value in log_items.items():
                 if value is not None:
                     self.log(key, value, prog_bar=True, sync_dist=True)
@@ -74,26 +84,28 @@ class ModelModule(pl.LightningModule):
         
         self.model.eval()
 
-        if self.use_kd:
-            loss_dict = self.model(x, x_len, y, y_len)
-            self.log("val/loss", loss_dict["total_loss"])
-            self.log("val/kd_loss", loss_dict["kd_loss"])
-            self.log("val/asr_loss", loss_dict["student_loss"])
-        else:
-            loss_output = self.model(x, x_len, y, y_len) 
-            log_items = {
-                "val/loss": loss_output.get("loss"),
-                "val/ctc_loss": loss_output.get("loss_ctc"),
-                "val/att_loss": loss_output.get("loss_att"),
-            }
-
-            for key, value in log_items.items():
-                if value is not None:
-                    self.log(key, value, prog_bar=True, sync_dist=True)
-            
-            with torch.no_grad():
-                recog_args = self.model_config.decoder 
-                decoded_raw_output = self.model.recognize(x, x_len, y, y_len, recog_args=recog_args)
+        # 메모리 최적화를 위해 gradient 계산 비활성화
+        with torch.no_grad():
+            if self.use_kd:
+                loss_dict = self.model(x, x_len, y, y_len)
+                self.log("val/loss", loss_dict["total_loss"])
+            else:
+                loss_output = self.model(x, x_len, y, y_len) 
+                val_loss = loss_output.get("loss")
+                # ↓ key를 "val_loss"로, 그리고 epoch 집계·로거 전송 플래그 추가
+                self.log(
+                    "val_loss",         # ModelCheckpoint(monitor="val_loss")와 동일
+                    val_loss,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+            # 인코딩과 디코딩을 분리하여 메모리 사용량 최적화
+            recog_args = self.model_config.decoder 
+            # y는 None으로, ylens는 그대로 전달하여 오류 수정
+            decoded_raw_output = self.model.recognize(x, x_len, None, y_len, recog_args=recog_args)
             
             predicted_transcriptions: List[str] = []
 
@@ -166,22 +178,18 @@ class ModelModule(pl.LightningModule):
 
             if self.model_config.report_wer: 
                 if batch_wers:
-                    avg_wer = sum(batch_wers) / len(batch_wers)
-                    if self.trainer.is_global_zero: 
-                        self.val_wer_samples.extend(batch_wers)
-                        self.val_wer_sum += sum(batch_wers) 
-                        self.val_wer_count += len(batch_wers)
-            
+                    # accumulate WER without using samples list
+                    self.val_wer_sum += sum(batch_wers)
+                    self.val_wer_count += len(batch_wers)
+
             if self.model_config.report_cer:
                 if batch_cers:
-                    avg_cer = sum(batch_cers) / len(batch_cers)
-                    self.log("val_cer", avg_cer, prog_bar=True, sync_dist=True)
-                    if self.trainer.is_global_zero:
-                        self.val_cer_samples.extend(batch_cers)
-                        self.val_cer_sum += sum(batch_cers)
-                        self.val_cer_count += len(batch_cers) 
+                    # accumulate CER without using samples list
+                    self.val_cer_sum += sum(batch_cers)
+                    self.val_cer_count += len(batch_cers) 
                 else:
-                    self.log("val_cer", 1.0, prog_bar=True, sync_dist=True) 
+                    pass
+                    # self.log("val_cer", 1.0, prog_bar=True, sync_dist=True) 
 
             if batch_idx == 0 and len(processed_reference_transcriptions) > 0:
                 logging.info(f"\n===== Batch {batch_idx}, Sample 0 (Decoder Type: {self.model.decoder_type}) =====")
@@ -196,191 +204,120 @@ class ModelModule(pl.LightningModule):
                 
                 
     def on_validation_epoch_start(self):
-        self.val_wer_samples = []
         self.val_wer_sum = 0
         self.val_wer_count = 0
-        self.val_cer_samples = []
         self.val_cer_sum = 0
         self.val_cer_count = 0
-        
-
-    def on_validation_epoch_end(self):
-        if self.val_wer_count > 0:
-            avg_wer_epoch = self.val_wer_sum / self.val_wer_count
-            
-            if self.logger and hasattr(self.logger, "experiment"):
-                if self.val_wer_samples:
-                    self.logger.experiment.log({
-                        "val_wer_histogram": wandb.Histogram(np.array(self.val_wer_samples)),
-                        "global_step": self.global_step
-                    })
-        else:
-            self.log("val_wer_epoch", 1.0, sync_dist=True)
-            
-        if self.val_cer_count > 0:
-            avg_cer_epoch = self.val_cer_sum / self.val_cer_count 
-            self.log("val_cer_epoch", avg_cer_epoch, sync_dist=True)
-            
-            if self.logger and hasattr(self.logger, "experiment"):
-                if self.val_cer_samples:
-                    self.logger.experiment.log({
-                        "val_cer_histogram": wandb.Histogram(np.array(self.val_cer_samples)), 
-                        "global_step": self.global_step
-                    })
-        else:
-            self.log("val_cer_epoch", 1.0, sync_dist=True)
-            
-        if self.trainer.is_global_zero: 
-            print(f"\n===== 검증 완료 =====")
-            if self.val_wer_count > 0:
-                print(f"검증 샘플 수: {self.val_wer_count}")
-                print(f"평균 WER (epoch-end): {avg_wer_epoch:.4f} ({avg_wer_epoch*100:.2f}%)")
-            if self.val_cer_count > 0 and self.model_config.report_cer: 
-                print(f"평균 CER (epoch-end): {avg_cer_epoch:.4f} ({avg_cer_epoch*100:.2f}%)")
                 
-                
-    def test_step(self, batch, batch_idx):
-        x, x_len, y, y_len, wav_path = batch
-        if self.use_kd:
-            logits = self.student_model.encode(x, x_len)
-            decoded_trans = self.student_model.recognize(logits)
-        else:
-            decoded_trans = self.model.recognize(x, x_len, y, y_len, self.model_config.decoder)
-
-        ref_trans: List[str] = []
-        for single_y_tokens in y:
-            filtered_tokens = [
-                token.item() for token in single_y_tokens 
-                if token.item() != self.model.ignore_id and 
-                   token.item() != self.model.sos and 
-                   token.item() != self.model.eos
-            ]
-            ref_trans.append(self.token_processor.id2text(filtered_tokens))
-        
-        predicted_transcriptions_test: List[str] = []
-        if isinstance(decoded_trans, dict):
-            if decoded_trans:
-                key_used = next(iter(decoded_trans.keys()))
-                if isinstance(decoded_trans[key_used], list) and \
-                   all(isinstance(s, list) and all(isinstance(w, str) for w in s) for s in decoded_trans[key_used]):
-                    predicted_transcriptions_test = [" ".join(word_list) for word_list in decoded_trans[key_used]]
-                elif isinstance(decoded_trans[key_used], list) and \
-                     all(isinstance(s, str) for s in decoded_trans[key_used]): # 이미 List[str]인 경우
-                    predicted_transcriptions_test = decoded_trans[key_used]
-                else:
-                    logging.warning(f"RNN-T decoded output dict value is unexpected type for {key_used}.")
-                    predicted_transcriptions_test = [""] * len(x)
-            else:
-                logging.warning("Decoded output is an empty dictionary.")
-                predicted_transcriptions_test = [""] * len(x)
-        elif isinstance(decoded_trans, list) and all(isinstance(d, str) for d in decoded_trans):
-            predicted_transcriptions_test = decoded_trans
-        else:
-            logging.warning(f"Unsupported decoded output type: {type(decoded_trans)}. Falling back to empty strings.")
-            predicted_transcriptions_test = [""] * len(x)
-
-        try:
-            processed_predicted_transcriptions = [preprocess_text(text) for text in predicted_transcriptions_test]
-            processed_reference_transcriptions = [preprocess_text(text) for text in ref_trans]
-        except NameError:
-            logging.warning("preprocess_text function not found. Using raw transcriptions for WER/CER in test_step.")
-            processed_predicted_transcriptions = predicted_transcriptions_test
-            processed_reference_transcriptions = ref_trans
-            
-        if self.trainer.is_global_zero: 
-            logging.info(f"\n===== Test Step Batch {batch_idx} Results =====")
-            for i in range(len(processed_reference_transcriptions)):
-                current_gt = processed_reference_transcriptions[i]
-                current_pr = processed_predicted_transcriptions[i]
-                logging.info(f"  Sample {i+1} GT: '{current_gt}'")
-                logging.info(f"  Sample {i+1} PR: '{current_pr}'")
-                if self.model_config.report_wer or self.model_config.report_cer:
-                    if current_gt or current_pr:
-                        sample_wer = jiwer.wer(current_gt, current_pr)
-                        # sample_cer = jiwer.cer(current_gt, current_pr)
-                        sample_cer = metrics.get_cer(current_gt, current_pr)['cer']
-                        logging.info(f"  Sample {i+1} WER: {sample_wer:.4f} ({sample_wer*100:.2f}%)")
-                        logging.info(f"  Sample {i+1} CER: {sample_cer:.4f} ({sample_cer*100:.2f}%)")
-                    else:
-                        logging.info(f"  Sample {i+1} WER/CER skipped (empty GT/PR).")
-            logging.info(f"========================================\n")
-        batch_wers = []
-        batch_cers = [] 
-        
-        try:
-            for gt, pred in zip(processed_reference_transcriptions, processed_predicted_transcriptions):
-                if gt or pred: 
-                    wer = jiwer.wer(gt, pred)
-                    batch_wers.append(wer)
                     
-                    # cer = jiwer.cer(gt, pred) 
-                    cer = metrics.get_cer(gt, pred)
-                    batch_cers.append(cer['cer']) 
-                else:
-                    logging.debug(f"Skipping WER/CER for empty GT/PR. GT='{gt}', PR='{pred}' in test_step.") 
-        except ImportError:
-            logging.error("jiwer library not installed. Cannot calculate WER/CER in test_step. Please install it with 'pip install jiwer'.") 
-            batch_wers = []
-            batch_cers = [] 
+    def on_validation_epoch_end(self):
+        avg_cer, avg_wer = None, None
 
-        if self.model_config.report_wer: 
-            if batch_wers:
-                avg_wer_batch = sum(batch_wers) / len(batch_wers) 
-                self.log("test_wer_batch", avg_wer_batch, on_step=True, on_epoch=False, prog_bar=True, logger=True) 
-                self.log("test_wer", avg_wer_batch, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
-            else:
-                self.log("test_wer_batch", 1.0, on_step=True, on_epoch=False, prog_bar=True, logger=True)
-                self.log("test_wer", 1.0, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        
-        if self.model_config.report_cer: 
-            if batch_cers:
-                avg_cer_batch = sum(batch_cers) / len(batch_cers) 
-                self.log("test_cer_batch", avg_cer_batch, on_step=True, on_epoch=False, prog_bar=True, logger=True) 
-                self.log("test_cer", avg_cer_batch, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
-            else:
-                self.log("test_cer_batch", 1.0, on_step=True, on_epoch=False, prog_bar=True, logger=True)
-                self.log("test_cer", 1.0, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        # CER epoch metric 로깅
+        if self.model_config.report_cer and self.val_cer_count > 0:
+            avg_cer = self.val_cer_sum / self.val_cer_count
+            self.log(
+                "val_cer_epoch",
+                avg_cer,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
 
-            # CSV 파일에 결과를 저장하기 위한 준비
-        if batch_idx == 0 and self.trainer.is_global_zero:
-            self.csv_file = open("test_results.csv", "w", encoding="utf-8", newline="")
-            self.csv_writer = csv.writer(self.csv_file)
-            self.csv_writer.writerow(["WAV_Path", "GT", "PR", "CER"])  # 헤더 작성
-            self.total_cer = 0.0
-            self.num_samples = 0
+        # WER epoch metric 로깅
+        if self.model_config.report_wer and self.val_wer_count > 0:
+            avg_wer = self.val_wer_sum / self.val_wer_count
+            self.log(
+                "val_wer_epoch",
+                avg_wer,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
 
-        # 각 샘플에 대한 결과 저장
+        # 2) print에서 logs 대신 avg_cer, avg_wer 사용
         if self.trainer.is_global_zero:
-            for i in range(len(processed_reference_transcriptions)):
-                current_gt = processed_reference_transcriptions[i]
-                current_pr = processed_predicted_transcriptions[i]
-                path = wav_path[i]
-                
-                if current_gt or current_pr:
-                    sample_cer = metrics.get_cer(current_gt, current_pr)['cer']
-                    self.csv_writer.writerow([path, current_gt, current_pr, f"{sample_cer:.4f}"])
-                    self.total_cer += sample_cer  # CER 합계 업데이트
-                    self.num_samples += 1  # 샘플 수 업데이트
+            print(f"\n===== Epoch {self.current_epoch} Validation Done "
+                  f"(CER={avg_cer}, WER={avg_wer}) =====")
+            
+    def on_test_epoch_start(self):
+        self.test_cer_sum = 0
+        self.test_cer_count = 0
+        if self.trainer.is_global_zero:
+            # CSV 파일 초기화 로직을 test_step에서 여기로 이동
+            self.csv_file = open("test_result.csv", "w", encoding="utf-8", newline="")
+            self.csv_writer = csv.writer(self.csv_file)
+            self.csv_writer.writerow(["WAV_Path", "GT", "PR", "CER"])
+
+    def test_step(self, batch, batch_idx):
+        x, x_len, y, ylens, wav_path = batch  # y, y_len은 사용하지 않으므로 _로 받음
+        self.model.eval()
+        with torch.no_grad():
+            # 테스트 시점에서는 Loss 계산이 불필요하므로 관련 코드 제거
+            # 오직 recognize만 수행
+            recog_args = self.model_config.decoder
+            decoded_raw_output = self.model.recognize(x, x_len, None, ylens, recog_args=recog_args)
+
+            predicted_transcriptions: List[str] = []
+            if self.model.decoder_type == 'rnnt':
+                if isinstance(decoded_raw_output, dict) and decoded_raw_output:
+                    first_key_value = next(iter(decoded_raw_output.values()))
+                    if isinstance(first_key_value, list) and all(isinstance(s, list) and all(isinstance(w, str) for w in s) for s in first_key_value):
+                        predicted_transcriptions = [" ".join(word_list) for word_list in first_key_value]
+                    else:
+                        predicted_transcriptions = [""] * len(x)
                 else:
-                    self.csv_writer.writerow([path, current_gt, current_pr, "N/A"])
+                    predicted_transcriptions = [""] * len(x)
+            else:
+                # 다른 디코더 타입에 대한 처리
+                pass
 
-        return {
-            "decoded_transcriptions": predicted_transcriptions_test,
-            "reference_transcriptions": ref_trans,
-            "cer_batch": avg_cer_batch if self.model_config.report_cer and batch_cers else None, 
-            "wer_batch": avg_wer_batch if self.model_config.report_wer and batch_wers else None, 
-        }
+            # GT를 가져오는 부분은 에러 계산을 위해 그대로 둡니다.
+            # 하지만 dataloader가 y를 반환하지 않는 경우를 대비해야 합니다.
+            # 이 예제에서는 batch에 y가 포함되어 있다고 가정합니다.
+            y, y_len = batch[2], batch[3]
+            reference_transcriptions: List[str] = []
+            for i in range(len(y)):
+                gt_tokens = y[i].tolist()
+                gt_text = self.token_processor.id2text(gt_tokens, filter_blank=True)
+                reference_transcriptions.append(gt_text)
 
+            processed_predicted_transcriptions = [preprocess_text(text) for text in predicted_transcriptions]
+            processed_reference_transcriptions = [preprocess_text(text) for text in reference_transcriptions]
+
+            for i in range(len(processed_reference_transcriptions)):
+                gt = processed_reference_transcriptions[i]
+                pr = processed_predicted_transcriptions[i]
+                path = wav_path[i]
+                cer = metrics.get_cer(gt, pr)["cer"] if (gt or pr) else 1.0
+                
+                # CER 누적
+                self.test_cer_sum += cer
+                self.test_cer_count += 1
+
+                # 로그 및 CSV 저장
+                logging.info(f"[Test] {path}\n  GT: {gt}\n  PR: {pr}\n  CER: {cer:.4f}")
+                if self.trainer.is_global_zero:
+                    self.csv_writer.writerow([path, gt, pr, f"{cer:.4f}"])
 
     def on_test_epoch_end(self):
-        if hasattr(self, "csv_file") and self.csv_file:
-            if hasattr(self, "total_cer") and hasattr(self, "num_samples"):
-                avg_cer = self.total_cer / self.num_samples if self.num_samples > 0 else 0.0
-                self.csv_writer.writerow(["", "", "평균 CER:", f"{avg_cer:.4f}"])  # 마지막 줄에 평균 CER 추가
-            else:
-                self.csv_writer.writerow(["", "", "평균 CER:", "N/A"])
+        # 전체 평균 CER 계산
+        avg_cer = self.test_cer_sum / self.test_cer_count if self.test_cer_count > 0 else 0.0
+        
+        # PyTorch Lightning 로거에 최종 메트릭 기록
+        self.log("test_avg_cer", avg_cer, prog_bar=True, logger=True, sync_dist=True)
+
+        # CSV 파일 마무리
+        if self.trainer.is_global_zero and self.csv_file is not None:
+            self.csv_writer.writerow(["", "", "평균 CER:", f"{avg_cer:.4f}"])
             self.csv_file.close()
-            logging.info("Test results saved to test_results.csv")
+            logging.info(f"Test results saved to test_result.csv with average CER: {avg_cer:.4f}")
+        
+        
         
     def configure_optimizers(self):
         initial_lr_for_optimizer = 1.0 
@@ -418,4 +355,3 @@ class ModelModule(pl.LightningModule):
                 "interval": "step"
             }
         }
-    

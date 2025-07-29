@@ -6,6 +6,9 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from .dataset import Dataset
 
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
+
 
 class ASRDataModule(pl.LightningDataModule):
     def __init__(self, config):
@@ -16,7 +19,6 @@ class ASRDataModule(pl.LightningDataModule):
             data_config: Configuration dictionary for data loading
         """
         super(ASRDataModule, self).__init__()
-        self.distil = config.model.distillation.using_distillation
         self.data_config = config.data
         self.dataloader_config = config.dataloader
         self.train_dataset = None
@@ -28,6 +30,7 @@ class ASRDataModule(pl.LightningDataModule):
         self.batch_size = self.dataloader_config.batch_size
         self.num_workers = self.dataloader_config.num_workers
         self.pin_memory = self.dataloader_config.pin_memory
+        self.persistent_workers = self.dataloader_config.get('persistent_workers', False)
         
         self.train_mean = self.data_config.get('audio_feature_mean', None)
         self.train_std = self.data_config.get('audio_feature_std', None)  
@@ -46,27 +49,27 @@ class ASRDataModule(pl.LightningDataModule):
         if (stage == 'fit' or stage is None) and \
            (not isinstance(precomputed_mean_val, torch.Tensor) or precomputed_mean_val is None):
             
-            temp_train_dataset_for_stats = Dataset(self.distil, self.data_config, 'train', compute_stats_only=True)
+            temp_train_dataset_for_stats = Dataset(self.data_config, 'train', compute_stats_only=True)
             self._compute_mean_std(temp_train_dataset_for_stats)
             
             precomputed_mean_val = self.train_mean
             precomputed_std_val = self.train_std
             
         if stage == 'fit' or stage is None:
-            self.train_dataset = Dataset(self.distil, self.data_config, 'train',
+            self.train_dataset = Dataset(self.data_config, 'train',
                                          precomputed_mean=precomputed_mean_val, precomputed_std=precomputed_std_val)
-            self.val_dataset = Dataset(self.distil, self.data_config, 'dev',
+            self.val_dataset = Dataset(self.data_config, 'dev',
                                        precomputed_mean=precomputed_mean_val, precomputed_std=precomputed_std_val)
         
         if stage == 'test' or stage is None:
             if self.test_clean:
-                self.test_dataset = Dataset(self.distil, self.data_config, 'testclean',
+                self.test_dataset = Dataset(self.data_config, 'testclean',
                                             precomputed_mean=precomputed_mean_val, precomputed_std=precomputed_std_val)
             else: 
-                self.test_datset = Dataset(self.distil, self.data_config, 'testother',
+                self.test_datset = Dataset(self.data_config, 'testother',
                                            precomputed_mean=precomputed_mean_val, precomputed_std=precomputed_std_val)
         if stage == 'validate':
-            self.val_dataset = Dataset(self.distil, self.data_config, 'dev')
+            self.val_dataset = Dataset(self.data_config, 'dev')
             
             
     def _compute_mean_std(self, dataset: Dataset):
@@ -127,14 +130,24 @@ class ASRDataModule(pl.LightningDataModule):
         
     def train_dataloader(self):
         """Return training dataloader"""
+        sampler = DistributedSampler(self.train_dataset, shuffle=True, drop_last=True)
+        # 2) debug 로깅: 전체 샘플 수·batch 수·rank
+        if dist.is_initialized():
+            rank = dist.get_rank()
+            world = dist.get_world_size()
+        else:
+            rank, world = 0, 1
+        total_batches = len(self.train_dataset) // (self.batch_size * world)
+        print(f"[R{rank}/{world}] TrainSampler: {len(self.train_dataset)=}, "
+              f"{self.batch_size=}, {total_batches=}")
         return DataLoader(
             self.train_dataset, 
             batch_size=self.batch_size,
-            shuffle=True,
+            shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             collate_fn=self._collate_fn,
-            persistent_workers=True
+            persistent_workers=self.persistent_workers if self.num_workers > 0 else False
         )
 
     def val_dataloader(self):
@@ -146,7 +159,7 @@ class ASRDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             collate_fn=self._collate_fn,
-            persistent_workers=True
+            persistent_workers=self.persistent_workers if self.num_workers > 0 else False
         )
 
     def test_dataloader(self):
@@ -158,7 +171,7 @@ class ASRDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             collate_fn=self._collate_fn,
-            persistent_workers=True
+            persistent_workers=self.persistent_workers if self.num_workers > 0 else False
         )
     
     def _collate_fn(self, batch):
